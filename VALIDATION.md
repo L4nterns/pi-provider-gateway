@@ -4,7 +4,8 @@
 
 - 独立公开仓库：[L4nterns/pi-provider-gateway](https://github.com/L4nterns/pi-provider-gateway)，包名 `pi-provider-gateway@1.0.0`。
 - 本轮实际测试宿主：Pi Coding Agent 1.5.0、Node.js 24.22.2。这是测试基线，不是插件要求锁定的 Pi 运行时版本；宿主提供的 peer dependencies 为 `*`。
-- 代码不依赖 pic、Docker、浏览器或独立认证后端。pic 只通过原生 `pi install` 从本仓库在线安装，不再捆绑源码。
+- 代码不依赖 pic、Docker、浏览器或独立认证后端。pic 只通过原生 `pi install` / `pi update` 从本仓库默认分支获取最新内容，不固定版本或提交、不捆绑源码。
+- pic 在共享数据没有其他托管 Pi 使用时的新启动前检查更新；接回不更新，已有进程不热替换。插件独立安装后的更新仍由原生 Pi 包管理负责，不在 Provider 内实现自更新。
 - 此次公开发布只调整安装说明、仓库元数据、验证文档与 CI；协议、凭据和模型能力实现保持不变。
 - 未发布 npm 包或预构建镜像，也未修改现有 Pi 的配置、凭据、模型覆盖、历史或宿主安装。
 
