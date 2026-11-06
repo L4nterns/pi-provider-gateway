@@ -11,7 +11,7 @@ const script = spawnSync('sh', ['-c', 'command -v script'], { encoding: 'utf8' }
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
-test('distributed package opens a concise native Pi menu; Escape and first-item Enter both return without mutations', { skip: !script, timeout: 30000 }, async t => {
+test('distributed package uses action-only menus and a real read-only model viewer', { skip: !script, timeout: 30000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'gateway-native-menu-'));
   const packageDir = join(dir, 'standalone-package'), agent = join(dir, 'agent');
   const cli = resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
@@ -50,15 +50,48 @@ test('distributed package opens a concise native Pi menu; Escape and first-item 
   // The footer is painted before startup installs command handlers. The native
   // session title is emitted after extension binding and editor setup finish.
   await wait(() => output.includes('gpt-6.1-sol') && output.includes('\x1b]0;'));
-  for (const cancel of ['\x1b', '\r']) {
+  for (let i = 0; i < 2; i++) {
     const start = output.length;
     proc.stdin.write('/gateway\r');
     await wait(() => output.slice(start).includes('添加服务') && output.slice(start).includes('删除服务'));
     const frame = output.slice(start);
-    assert(frame.includes('返回'));
-    assert(!frame.match(/账号、路由|不管理|不发出生成探测|创建稳定 ID/));
-    proc.stdin.write(cancel); await sleep(150);
+    assert(!frame.match(/返回|账号、路由|不管理|不发出生成探测|创建稳定 ID/));
+    assert(frame.includes('编辑模型'));
+    proc.stdin.write('\x1b'); await sleep(150);
   }
+  const infoStart = output.length;
+  proc.stdin.write('/gateway info demo\r');
+  await wait(() => output.slice(infoStart).includes('模型信息') && output.slice(infoStart).includes(id));
+  proc.stdin.write('\r');
+  await wait(() => output.slice(infoStart).includes('生效参数'));
+  const viewerStart = output.length;
+  proc.stdin.write('\r\x07'); await sleep(150);
+  proc.stdin.write('\x1b[6~');
+  await wait(() => output.slice(infoStart).includes('价格'));
+  const viewer = output.slice(infoStart);
+  assert(!viewer.match(/enter submit|external editor|ctrl\+g|仅查看；关闭即可/));
+  assert(viewer.includes('「Esc」返回'));
+  assert(!output.slice(viewerStart).includes('Gateway\x1b'), 'Enter and Ctrl-G do not open an editor or close the viewer');
+  proc.stdin.write('\x1b'); await sleep(150);
+  const editStart = output.length;
+  proc.stdin.write('/gateway model demo\r');
+  await wait(() => output.slice(editStart).includes('编辑模型') && output.slice(editStart).includes(id));
+  proc.stdin.write('\r');
+  await wait(() => output.slice(editStart).includes('模型参数'));
+  proc.stdin.write('\r');
+  await wait(() => output.slice(editStart).includes('参数覆盖') && output.slice(editStart).includes('submit'));
+  proc.stdin.write('\x01\x0b{"contextWindow":240000,"compat":{"supportsExplicitPromptCacheMode":false}}\r');
+  await wait(() => output.slice(editStart).includes('模型已保存'));
+  const config = JSON.parse(await readFile(join(agent, 'models.json'), 'utf8'));
+  assert.equal(config.providers.demo.modelOverrides[id].contextWindow, 240000);
+  assert.equal(config.providers.demo.modelOverrides[id].compat.supportsExplicitPromptCacheMode, false);
+  const refreshedStart = output.length;
+  proc.stdin.write('/gateway info demo\r');
+  await wait(() => output.slice(refreshedStart).includes('模型信息'));
+  proc.stdin.write('\r');
+  await wait(() => output.slice(refreshedStart).includes('240,000 tokens'));
+  assert(!output.slice(refreshedStart).includes('submit'));
+  proc.stdin.write('\x1b'); await sleep(150);
   assert(!output.includes('Startup is still in progress'));
   assert(!output.includes('已有 Gateway 操作'));
   assert(!output.includes('Failed to load extension'));

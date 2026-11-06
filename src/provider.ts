@@ -113,16 +113,29 @@ export function createGateway(connection: Connection, store: Store, expectedConn
     }
     const key = (await interaction.prompt({ type: 'secret', message: old?.key && root === current ? 'API Key（留空保留当前密钥）' : 'API Key' })).trim() || (root === current ? old?.key : undefined);
     if (!key || /[\x00-\x20\x7f]/.test(key)) throw new Error('请输入有效 API Key');
+    // Edit creates an isolated handle; load matching last-good evidence before
+    // discovery so transient probe errors cannot erase earlier successes.
+    if (old?.key === key && current === root) snapshot = await store.snapshot(connection.id, fingerprint(root, key));
     let s = await network('正在读取模型目录与协议声明…', signal => fresh(root, key, signal, false));
     const unknown = s.discovery.rows.filter(r => !s.discovery.protocols[String(r.id)]?.length && !connection.protocol && !connection.modelProtocols?.[String(r.id)]);
-    if (unknown.length) {
-      const answer = await interaction.prompt({ type: 'select', message: `${unknown.length} 个模型协议未知 · 探测最多 ${unknown.length * PROTOCOLS.length} 次请求，可能计费`, options: [{ id: 'cancel', label: '取消' }, { id: 'probe', label: '探测协议', description: '验证这些模型' }, ...PROTOCOLS.map(id => ({ id, label: id, description: '整个服务手动使用' }))] });
+    if (unknown.length || expectedConnection !== null) {
+      const targets = expectedConnection === null ? unknown : s.discovery.rows;
+      const options = [{ id: 'cancel', label: '取消' },
+        ...(!unknown.length ? [{ id: 'keep', label: '保持当前设置' }] : []),
+        ...(expectedConnection !== null && !unknown.length ? [{ id: 'auto', label: '自动选择', description: '清除服务协议指定，保留模型指定' }] : []),
+        { id: 'probe', label: '探测协议', description: `验证这 ${targets.length} 个模型` },
+        ...PROTOCOLS.map(id => ({ id, label: id, description: '整个服务手动使用' }))];
+      const answer = await interaction.prompt({ type: 'select', message: `协议设置 · 探测最多 ${targets.length * PROTOCOLS.length} 次请求，可能计费`, options });
       if (answer === 'cancel') throw new Error('已取消');
       if (answer === 'probe') {
         const rows = s.discovery.rows;
-        s = await network('正在逐模型探测协议…', (signal, report) => fresh(root, key, signal, true, { rows, probeModels: new Set(unknown.map(r => String(r.id))), report }), 600000);
-      } else if (PROTOCOLS.includes(answer as Protocol)) connection = { ...connection, protocol: answer as Protocol };
-      else throw new Error('无效协议选择');
+        s = await network('正在逐模型探测协议…', (signal, report) => fresh(root, key, signal, true, { rows, probeModels: new Set(targets.map(r => String(r.id))), probeDeclared: expectedConnection !== null, report }), 600000);
+        if (!s.discovery.probes.some(r => r.ok)) throw new Error('本次探测未成功，原配置保持不变；超时、鉴权或配额错误不等于协议不支持');
+        const failed = s.discovery.probes.filter(r => !r.ok);
+        if (failed.length) interaction.notify({ type: 'info', message: `${failed.length} 次探测未确认支持；已有证据保留。${failed.map(r => `${r.model} / ${r.api}: ${r.reason ?? '未知'}`).join('；')}` });
+      } else if (answer === 'auto') { connection = { ...connection }; delete connection.protocol; }
+      else if (PROTOCOLS.includes(answer as Protocol)) connection = { ...connection, protocol: answer as Protocol };
+      else if (answer !== 'keep') throw new Error('无效协议选择');
     }
     const nextModels = await network('正在解析模型能力与公开元数据…', signal => mapped(root, s, signal, true));
     if (s.discovery.rows.length && !nextModels.length) throw new Error('尚未找到可用协议，未替换现有配置');
@@ -179,7 +192,7 @@ export function createGateway(connection: Connection, store: Store, expectedConn
       const credential = await storedCredential(store.dir, connection.id); const root = await restore(credential, signal);
       if (!root || !credential?.key || snapshot || !allowNetwork) return;
       try { const s = await fresh(root, credential.key, combined(signal), false); models = await mapped(root, s, signal, true); await store.save(connection.id, s); snapshot = s; }
-      catch { signal.throwIfAborted(); /* First use can retry from /gateway refresh. */ }
+      catch { signal.throwIfAborted(); /* Retry catalog discovery through /gateway edit. */ }
     },
     dispose() { disposed = true; lifetime.abort(); },
     info: () => ({ models, unknown: snapshot?.discovery.rows.map(r => String(r.id)).filter(id => !models.some(m => m.id === id)) ?? [], checkedAt: snapshot?.checkedAt ?? 0 }),

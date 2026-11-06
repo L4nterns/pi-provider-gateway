@@ -186,13 +186,14 @@ export interface DiscoveryOptions {
   // Reuse exactly the catalog and unknown IDs shown in the paid-probe consent.
   rows?: Row[];
   probeModels?: ReadonlySet<string>;
+  probeDeclared?: boolean;
   report?: (message: string) => void;
 }
 export async function discover(root: string, key: string, signal: AbortSignal, options: DiscoveryOptions = {}): Promise<Discovery> {
   signal.throwIfAborted();
   const rows = (options.rows ?? await fetchCatalog(root, key, signal)).filter(chatRow);
   const protocols: Discovery['protocols'] = {}; const evidence: Discovery['evidence'] = {}; const probes: ProbeResult[] = [];
-  const total = rows.filter(r => !declaredProtocols(r).length && (!options.probeModels || options.probeModels.has(String(r.id)))).length * PROTOCOLS.length;
+  const total = rows.filter(r => (options.probeDeclared || !declaredProtocols(r).length) && (!options.probeModels || options.probeModels.has(String(r.id)))).length * PROTOCOLS.length;
   let step = 0;
   const controller = new AbortController();
   const workSignal = AbortSignal.any([signal, controller.signal]);
@@ -200,7 +201,7 @@ export async function discover(root: string, key: string, signal: AbortSignal, o
   const jobs = rows.map(row => async () => {
     workSignal.throwIfAborted();
     const id = String(row.id); const declared = declaredProtocols(row);
-    if (declared.length) { protocols[id] = declared; evidence[id] = 'endpoint'; return; }
+    if (declared.length && !options.probeDeclared) { protocols[id] = declared; evidence[id] = 'endpoint'; return; }
     if (options.previous?.protocols[id]?.length && (!options.probe || options.probeModels && !options.probeModels.has(id))) {
       protocols[id] = options.previous.protocols[id]; evidence[id] = options.previous.evidence[id]; return;
     }
@@ -210,7 +211,10 @@ export async function discover(root: string, key: string, signal: AbortSignal, o
       workSignal.throwIfAborted(); options.report?.(`探测 ${id}（${++step}/${total}）：${api}…`);
       results.push(await probeProtocol(root, key, api, id, workSignal));
     }
-    probes.push(...results); protocols[id] = results.filter(r => r.ok).map(r => r.api); evidence[id] = 'probe';
+    const succeeded = results.filter(r => r.ok).map(r => r.api);
+    probes.push(...results);
+    protocols[id] = [...new Set([...declared, ...(options.previous?.protocols[id] ?? []), ...succeeded])];
+    evidence[id] = succeeded.length ? 'probe' : declared.length ? 'endpoint' : options.previous?.evidence[id] ?? 'unknown';
   });
   let cursor = 0;
   // Await ALL workers even on cancellation/failure; no hidden probes after UI dismissal.

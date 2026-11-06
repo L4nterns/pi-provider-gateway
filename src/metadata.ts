@@ -115,11 +115,13 @@ export function buildModels(connection: Connection, root: string, discovery: Dis
     const apiEvidence = connection.modelProtocols?.[id] || connection.protocol ? 'user' : discovery.evidence[id] ?? 'unknown';
     const warnings: string[] = [];
     const cost = take('cost', zeroCost());
-    if (sources.cost !== 'endpoint') warnings.push('价格为公共目录估算或未知，并非网关账单');
-    if (Object.values(sources).includes('unverified-default')) warnings.push('部分能力没有可靠元数据，使用未验证默认值');
+    const name = take('name', id), input = take('input', ['text']);
+    if (sources.cost === 'unverified-default') warnings.push('价格未知；Pi 的 0 占位不代表免费');
+    else if (sources.cost !== 'endpoint') warnings.push('价格为公共目录参考值，并非网关账单');
+    if (Object.entries(sources).some(([k, v]) => k !== 'cost' && v === 'unverified-default')) warnings.push('部分能力没有可靠元数据，使用未验证默认值');
     const model: GatewayModel = {
-      id, name: take('name', id), provider: connection.id, api, baseUrl: baseFor(root, api),
-      contextWindow, maxTokens, reasoning, input: take('input', ['text']), cost,
+      id, name, provider: connection.id, api, baseUrl: baseFor(root, api),
+      contextWindow, maxTokens, reasoning, input, cost,
       ...(map ? { thinkingLevelMap: map } : {}),
       gateway: { source: sources, protocols: discovery.protocols[id] ?? [api], protocolEvidence: apiEvidence, warnings },
     };

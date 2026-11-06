@@ -1,6 +1,6 @@
 import type { AuthInteraction, AuthPrompt } from '@earendil-works/pi-ai';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { CURSOR_MARKER, Loader, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { CURSOR_MARKER, Loader, matchesKey, ScrollView, Text, truncateToWidth } from '@earendil-works/pi-tui';
 
 // Use Pi's active theme/keybindings and native spinner; cancellation waits for I/O
 // to settle before releasing the command lock, rather than leaving work in the background.
@@ -40,7 +40,7 @@ export function secretInput(ctx: ExtensionCommandContext, message: string, signa
     if (signal?.aborted) queueMicrotask(cancel);
     return {
       focused: true,
-      render(width) { return [truncateToWidth(theme.fg('accent', message), width), truncateToWidth(`> ${'*'.repeat(Math.min(value.length, Math.max(0, width - 4)))}`, Math.max(0, width - 1)) + CURSOR_MARKER + ' ', truncateToWidth('「Enter」确认 · 「Esc」取消', width)]; },
+      render(width) { return [truncateToWidth(theme.fg('accent', message), width), truncateToWidth(`> ${'*'.repeat(Math.min(value.length, Math.max(0, width - 4)))}`, Math.max(0, width - 1)) + CURSOR_MARKER + ' ', truncateToWidth('「Esc」取消 · 「Enter」确认', width)]; },
       handleInput(data) {
         if (keys.matches(data, 'tui.select.cancel')) { cancel(); return; }
         if (keys.matches(data, 'tui.select.confirm')) { finish(value); return; }
@@ -57,6 +57,37 @@ export function secretInput(ctx: ExtensionCommandContext, message: string, signa
     };
   }, { blocked: { kind: 'auth', message } }).then(value => { if (value === undefined) throw new Error('已取消密钥输入'); return value; });
 }
+// Native components and Pi's renderer own wrapping/diffing. This screen has no
+// editor, submit path, external editor, persistence or model-context messages.
+export function readOnly(ctx: ExtensionCommandContext, title: string, body: string): Promise<void> {
+  return ctx.ui.custom<void>((tui, theme, keys, done) => {
+    const text = new Text(body, 0, 0);
+    const scroll = new ScrollView(text, { overscroll: 'contain' });
+    let visible = 1;
+    return {
+      capturesViewportInput: true,
+      render(width) {
+        visible = Math.max(1, Math.min(22, tui.terminal.rows - 7));
+        const lines = scroll.render(width);
+        scroll.updateLayout(lines.length, visible, () => tui.requestRender());
+        return [truncateToWidth(theme.fg('accent', title), width), '', ...lines.slice(scroll.scrollTop, scroll.scrollTop + visible), '', truncateToWidth(theme.fg('dim', '「Esc」返回 · 「↑/↓」滚动 · 「PgUp/PgDn」翻页'), width)];
+      },
+      handleInput(data) {
+        if (keys.matches(data, 'tui.select.cancel')) { done(); return; }
+        if (keys.matches(data, 'tui.select.up')) scroll.scrollBy(-1);
+        else if (keys.matches(data, 'tui.select.down')) scroll.scrollBy(1);
+        else if (keys.matches(data, 'tui.select.pageUp')) scroll.scrollBy(-visible);
+        else if (keys.matches(data, 'tui.select.pageDown')) scroll.scrollBy(visible);
+        else if (matchesKey(data, 'home')) scroll.scrollToStart();
+        else if (matchesKey(data, 'end')) scroll.scrollToEnd();
+        else return;
+        tui.requestRender();
+      },
+      invalidate() { text.invalidate(); },
+    };
+  }, { blocked: { kind: 'question', message: title } });
+}
+
 export function interaction(ctx: ExtensionCommandContext, signal: AbortSignal): AuthInteraction {
   return {
     signal,
