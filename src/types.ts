@@ -2,6 +2,7 @@ import type { Model, ThinkingLevelMap } from '@earendil-works/pi-ai';
 
 export const PROTOCOLS = ['openai-responses', 'anthropic-messages', 'google-generative-ai', 'openai-completions'] as const;
 export type Protocol = typeof PROTOCOLS[number];
+export type GatewayOperation = <T>(message: string, signal: AbortSignal, work: (signal: AbortSignal, report: (message: string) => void) => Promise<T>) => Promise<T>;
 export type Row = Record<string, unknown>;
 export type GatewayModel = Model<Protocol> & {
   gateway: { binding?: string; source: Record<string, string>; protocols: Protocol[]; protocolEvidence: string; warnings: string[] };

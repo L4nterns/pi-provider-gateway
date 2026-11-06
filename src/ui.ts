@@ -1,11 +1,37 @@
 import type { AuthInteraction, AuthPrompt } from '@earendil-works/pi-ai';
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { CURSOR_MARKER, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { CURSOR_MARKER, Loader, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+
+// Use Pi's active theme/keybindings and native spinner; cancellation waits for I/O
+// to settle before releasing the command lock, rather than leaving work in the background.
+export async function progress<T>(ctx: ExtensionCommandContext, message: string, parent: AbortSignal, work: (signal: AbortSignal, report: (message: string) => void) => Promise<T>): Promise<T> {
+  const outcome = await ctx.ui.custom<{ value: T } | { error: unknown }>((tui, theme, keys, done) => {
+    const controller = new AbortController();
+    const signal = AbortSignal.any([parent, controller.signal]);
+    const loader = new Loader(tui, s => theme.fg('accent', s), s => theme.fg('muted', s), message);
+    const report = (text: string) => { if (!signal.aborted) loader.setMessage(text); };
+    Promise.resolve().then(() => { signal.throwIfAborted(); return work(signal, report); })
+      .then(value => done({ value }), error => done({ error }));
+    return {
+      render: width => [...loader.render(width), truncateToWidth('Esc 取消操作', width)],
+      handleInput(data) {
+        if (keys.matches(data, 'tui.select.cancel')) {
+          controller.abort(new Error('已取消 Gateway 操作'));
+          loader.setMessage('正在取消…');
+        }
+      },
+      invalidate() { loader.invalidate(); },
+      dispose() { controller.abort(); loader.stop(); },
+    };
+  });
+  if ('error' in outcome) throw outcome.error;
+  return outcome.value;
+}
 
 // A secret never reaches the ordinary editor, scrollback, session entries or model context.
 // Deliberately append/backspace only; no clipboard/history integration.
 export function secretInput(ctx: ExtensionCommandContext, message: string, signal?: AbortSignal): Promise<string> {
-  if (ctx.mode !== 'tui') return Promise.reject(new Error('密钥输入需要 Pi 交互终端；也可使用原生 /login'));
+  if (ctx.mode !== 'tui') return Promise.reject(new Error('密钥输入需要 Pi 交互终端；请在终端运行 /gateway'));
   return ctx.ui.custom<string | undefined>((tui, theme, keys, done) => {
     let value = ''; let ended = false;
     const finish = (result: string | undefined) => { if (ended) return; ended = true; signal?.removeEventListener('abort', cancel); done(result); };
@@ -35,15 +61,16 @@ export function interaction(ctx: ExtensionCommandContext, signal: AbortSignal): 
   return {
     signal,
     async prompt(prompt: AuthPrompt) {
-      signal.throwIfAborted();
-      if (prompt.type === 'secret') return secretInput(ctx, prompt.message, signal);
+      const promptSignal = prompt.signal ? AbortSignal.any([signal, prompt.signal]) : signal;
+      promptSignal.throwIfAborted();
+      if (prompt.type === 'secret') return secretInput(ctx, prompt.message, promptSignal);
       if (prompt.type === 'select') {
-        const choice = await ctx.ui.select(prompt.message, prompt.options.map(o => `${o.label} [${o.id}]`), { signal });
+        const labels = prompt.options.map(o => o.description ? `${o.label}  ${o.description}` : o.label);
+        const choice = await ctx.ui.select(prompt.message, labels, { signal: promptSignal });
         if (choice === undefined) throw new Error('已取消');
-        const index = prompt.options.findIndex(o => `${o.label} [${o.id}]` === choice);
-        return prompt.options[index].id;
+        return prompt.options[labels.indexOf(choice)].id;
       }
-      const value = await ctx.ui.input(prompt.message, prompt.placeholder, { signal });
+      const value = await ctx.ui.input(prompt.message, prompt.placeholder, { signal: promptSignal });
       if (value === undefined) throw new Error('已取消');
       return value;
     },

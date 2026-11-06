@@ -180,22 +180,46 @@ export function chatRow(row: Row): boolean {
   if (output.length && !output.includes('text')) return false;
   return !/(?:embedding|rerank|whisper|dall-e|gpt-image|imagen-|^flux[.-]|tts|^sora|image-generation)/.test(id);
 }
-export async function discover(root: string, key: string, signal: AbortSignal, options: { probe?: boolean; previous?: Discovery } = {}): Promise<Discovery> {
-  const rows = (await fetchCatalog(root, key, signal)).filter(chatRow);
+export interface DiscoveryOptions {
+  probe?: boolean;
+  previous?: Discovery;
+  // Reuse exactly the catalog and unknown IDs shown in the paid-probe consent.
+  rows?: Row[];
+  probeModels?: ReadonlySet<string>;
+  report?: (message: string) => void;
+}
+export async function discover(root: string, key: string, signal: AbortSignal, options: DiscoveryOptions = {}): Promise<Discovery> {
+  signal.throwIfAborted();
+  const rows = (options.rows ?? await fetchCatalog(root, key, signal)).filter(chatRow);
   const protocols: Discovery['protocols'] = {}; const evidence: Discovery['evidence'] = {}; const probes: ProbeResult[] = [];
-  // Only missing declarations need POST probes. Limit concurrent requests, not model coverage.
+  const total = rows.filter(r => !declaredProtocols(r).length && (!options.probeModels || options.probeModels.has(String(r.id)))).length * PROTOCOLS.length;
+  let step = 0;
+  const controller = new AbortController();
+  const workSignal = AbortSignal.any([signal, controller.signal]);
+  // Only missing declarations need POST probes. Limit concurrency, not model coverage.
   const jobs = rows.map(row => async () => {
+    workSignal.throwIfAborted();
     const id = String(row.id); const declared = declaredProtocols(row);
     if (declared.length) { protocols[id] = declared; evidence[id] = 'endpoint'; return; }
-    if (options.previous?.protocols[id]?.length && !options.probe) {
+    if (options.previous?.protocols[id]?.length && (!options.probe || options.probeModels && !options.probeModels.has(id))) {
       protocols[id] = options.previous.protocols[id]; evidence[id] = options.previous.evidence[id]; return;
     }
-    if (!options.probe) return;
+    if (!options.probe || options.probeModels && !options.probeModels.has(id)) return;
     const results: ProbeResult[] = [];
-    for (const api of preference(id)) { signal.throwIfAborted(); results.push(await probeProtocol(root, key, api, id, signal)); }
+    for (const api of preference(id)) {
+      workSignal.throwIfAborted(); options.report?.(`探测 ${id}（${++step}/${total}）：${api}…`);
+      results.push(await probeProtocol(root, key, api, id, workSignal));
+    }
     probes.push(...results); protocols[id] = results.filter(r => r.ok).map(r => r.api); evidence[id] = 'probe';
   });
   let cursor = 0;
-  await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, async () => { while (cursor < jobs.length) await jobs[cursor++](); }));
+  // Await ALL workers even on cancellation/failure; no hidden probes after UI dismissal.
+  const workers = await Promise.allSettled(Array.from({ length: Math.min(3, jobs.length) }, async () => {
+    try { while (cursor < jobs.length) await jobs[cursor++](); }
+    catch (error) { controller.abort(error); throw error; }
+  }));
+  const failed = workers.find(r => r.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
+  signal.throwIfAborted();
   return { rows, protocols, evidence, probes };
 }

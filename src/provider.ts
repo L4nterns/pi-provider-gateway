@@ -2,10 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createProvider, type ProviderStreams, type Model, type ApiKeyCredential, type Provider, type ProviderAuthInteraction, type RefreshModelsContext } from '@earendil-works/pi-ai';
 import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
-import { decodeRows, discover, fingerprint, normalizeUrl, requestJson } from './discovery.ts';
+import { decodeRows, discover, fingerprint, normalizeUrl, requestJson, type DiscoveryOptions } from './discovery.ts';
 import { buildModels, builtinMetadata } from './metadata.ts';
 import { atomicJson, metadataOnly, readJson, Store } from './storage.ts';
-import { PROTOCOLS, record, type Connection, type Discovery, type GatewayModel, type Protocol, type Row, type Snapshot } from './types.ts';
+import { PROTOCOLS, record, type Connection, type Discovery, type GatewayModel, type GatewayOperation, type Protocol, type Row, type Snapshot } from './types.ts';
 
 const ROOT = 'PI_GATEWAY_URL';
 const TTL = 60 * 60 * 1000;
@@ -64,7 +64,7 @@ export interface GatewayHandle {
   dispose(): void;
   info(): { models: readonly GatewayModel[]; unknown: string[]; checkedAt: number };
 }
-export function createGateway(connection: Connection, store: Store): GatewayHandle {
+export function createGateway(connection: Connection, store: Store, expectedConnection: Connection | null = connection, run?: GatewayOperation): GatewayHandle {
   let models: GatewayModel[] = [];
   let snapshot: Snapshot | undefined;
   let disposed = false;
@@ -85,41 +85,50 @@ export function createGateway(connection: Connection, store: Store): GatewayHand
     }
     return root;
   }
-  async function fresh(root: string, key: string, signal: AbortSignal, probe: boolean): Promise<Snapshot> {
-    const discovery = await discover(root, key, signal, { probe, previous: snapshot?.fingerprint === fingerprint(root, key) ? snapshot.discovery : undefined });
+  async function fresh(root: string, key: string, signal: AbortSignal, probe: boolean, options: DiscoveryOptions = {}): Promise<Snapshot> {
+    const discovery = await discover(root, key, signal, { ...options, probe, previous: snapshot?.fingerprint === fingerprint(root, key) ? snapshot.discovery : undefined });
     return { version: 1, fingerprint: fingerprint(root, key), checkedAt: Date.now(), discovery: { ...discovery, rows: discovery.rows.map(metadataOnly) } };
   }
   const login = async (interaction: ProviderAuthInteraction): Promise<ApiKeyCredential> => {
     if (/^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? '')) throw new Error('离线模式不能验证登录；未发出网络请求');
     const signal = combined(interaction.signal);
-    const expectedConnection = (await store.registry()).connections.find(c => c.id === connection.id);
-    const old = await storedCredential(store.dir, connection.id);
+    const network = <T>(message: string, work: (signal: AbortSignal, report: (message: string) => void) => Promise<T>, timeout = 60000): Promise<T> => {
+      const timed = AbortSignal.any([signal, AbortSignal.timeout(timeout)]);
+      if (run) return run(message, timed, work);
+      interaction.notify({ type: 'progress', message });
+      return work(timed, message => interaction.notify({ type: 'progress', message }));
+    };
+    // Creation must not reuse an orphaned credential or overwrite a concurrent add.
+    const old = expectedConnection === null ? undefined : await storedCredential(store.dir, connection.id);
     const current = credentialRoot(connection, old);
-    const entered = await interaction.prompt({ type: 'text', message: '服务 URL（留空保留当前地址）', placeholder: current ?? 'https://api.example.com' });
-    const root = normalizeUrl(entered.trim() || current || '');
+    let root: string;
+    for (;;) {
+      const entered = await interaction.prompt({ type: 'text', message: current ? '服务 URL（留空保留当前地址）' : '服务 URL', placeholder: current ?? 'https://api.example.com' });
+      try { root = normalizeUrl(entered.trim() || current || ''); break; }
+      catch { interaction.notify({ type: 'info', message: 'URL 格式无效：需为 http(s) 地址，不能含用户名、密码、查询参数或片段；请重新输入，Esc 取消。' }); }
+    }
     if (new URL(root).protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(root).hostname)) {
       const answer = await interaction.prompt({ type: 'select', message: '此地址使用明文 HTTP，密钥可能被窃听。是否继续？', options: [{ id: 'no', label: '取消' }, { id: 'yes', label: '继续' }] });
       if (answer !== 'yes') throw new Error('已取消');
     }
     const key = (await interaction.prompt({ type: 'secret', message: old?.key && root === current ? 'API Key（留空保留当前密钥）' : 'API Key' })).trim() || (root === current ? old?.key : undefined);
     if (!key || /[\x00-\x20\x7f]/.test(key)) throw new Error('请输入有效 API Key');
-    interaction.notify({ type: 'progress', message: '正在读取模型目录与协议声明…' });
-    let s = await fresh(root, key, signal, false);
+    let s = await network('正在读取模型目录与协议声明…', signal => fresh(root, key, signal, false));
     const unknown = s.discovery.rows.filter(r => !s.discovery.protocols[String(r.id)]?.length && !connection.protocol && !connection.modelProtocols?.[String(r.id)]);
     if (unknown.length) {
-      const answer = await interaction.prompt({ type: 'select', message: `${unknown.length} 个模型未声明协议。探测最多发出 ${unknown.length * PROTOCOLS.length} 次小型请求，可能计费；只在此处探测并缓存。`, options: [{ id: 'probe', label: '自动探测支持的协议' }, ...PROTOCOLS.map(id => ({ id, label: `不探测，统一使用 ${id}` })), { id: 'cancel', label: '取消' }] });
+      const answer = await interaction.prompt({ type: 'select', message: `${unknown.length} 个模型未声明协议。探测最多发出 ${unknown.length * PROTOCOLS.length} 次小型请求，可能计费。`, options: [{ id: 'cancel', label: '取消' }, { id: 'probe', label: '探测协议', description: '仅探测本次目录中的未知模型，可能计费' }, ...PROTOCOLS.map(id => ({ id, label: id, description: '不探测，手动指定整个服务的协议' }))] });
       if (answer === 'cancel') throw new Error('已取消');
       if (answer === 'probe') {
-        interaction.notify({ type: 'progress', message: '正在逐模型探测协议…' });
-        s = await fresh(root, key, signal, true);
+        const rows = s.discovery.rows;
+        s = await network('正在逐模型探测协议…', (signal, report) => fresh(root, key, signal, true, { rows, probeModels: new Set(unknown.map(r => String(r.id))), report }), 600000);
       } else if (PROTOCOLS.includes(answer as Protocol)) connection = { ...connection, protocol: answer as Protocol };
       else throw new Error('无效协议选择');
     }
-    const nextModels = await mapped(root, s, signal, true);
+    const nextModels = await network('正在解析模型能力与公开元数据…', signal => mapped(root, s, signal, true));
     if (s.discovery.rows.length && !nextModels.length) throw new Error('尚未找到可用协议，未替换现有配置');
     signal.throwIfAborted();
     // Verify/persist non-secret connection before native Models.login commits the credential.
-    await store.put({ ...connection, url: root }, expectedConnection ?? null);
+    await store.put({ ...connection, url: root }, expectedConnection);
     await store.save(connection.id, s);
     connection = { ...connection, url: root }; snapshot = s; models = nextModels;
     return { type: 'api_key', key, env: { [ROOT]: root } };

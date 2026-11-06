@@ -18,7 +18,7 @@ test('native login persists credentials with Pi locking; extension config/cache 
   const server=createServer((req,res)=>{ assert.equal(req.headers['anthropic-version'],undefined,'catalog must not accidentally negotiate Anthropic format');res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[{id,native_endpoints:['/v1/responses']}]})); });
   await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise<void>(r=>{server.closeAllConnections();server.close(()=>r());}));
   const root=`http://127.0.0.1:${(server.address() as any).port}`;const store=new Store(dir);const c={id:'test-login',name:'Test'};
-  const h=createGateway(c,store);t.after(()=>h.dispose());
+  const h=createGateway(c,store,null);t.after(()=>h.dispose());
   const runtime=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:null,modelsStore:new InMemoryModelsStore(),refreshOnCreate:false});
   runtime.registerNativeProvider(h.provider);await runtime.refresh({allowNetwork:false});
   const credential=await runtime.login(c.id,'api_key',{prompt:async p=>p.type==='secret'?'private-fake-key':root,notify:()=>{}});

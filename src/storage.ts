@@ -60,6 +60,11 @@ export class Store {
   constructor(dir: string) { this.dir = dir; }
   get registryPath() { return join(this.dir, 'gateway.json'); }
   async registry(): Promise<Registry> { return parseRegistry(await readJson(this.registryPath)); }
+  // Serialize cooperating Gateway commands through native credential commit/logout,
+  // not only each registry write. No lock is held during ordinary model requests.
+  async operation<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    return locked(`${this.cachePath(id)}.operation`, fn);
+  }
   async put(c: Connection, expected?: Connection | null): Promise<void> {
     await locked(this.registryPath, async () => {
       const registry = await this.registry(); const old = registry.connections.find(x => x.id === c.id);

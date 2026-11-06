@@ -4,6 +4,8 @@ import { createServer, type RequestListener } from 'node:http';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { InMemoryModelsStore, getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { baseFor, decodeRows, declaredProtocols, discover, fingerprint, normalizeUrl, probeProtocol, selectProtocol, validProbeResponse } from '../src/discovery.ts';
@@ -124,6 +126,28 @@ test('atomic private registry writes preserve concurrent additions and reject lo
   await writeFile(store.registryPath, '{broken'); await assert.rejects(store.registry());
   assert.equal(await readFile(store.registryPath, 'utf8'), '{broken');
 });
+test('service operation lock spans native credential orchestration across processes, then releases on failure', async t => {
+  const dir = await directory(t), store = new Store(dir), marker = join(dir, 'child-acquired');
+  let child: ReturnType<typeof spawn> | undefined;
+  t.after(() => child?.kill('SIGTERM'));
+  let exited!: Promise<number | null>;
+  await store.operation('shared', async () => {
+    const script = `import { Store } from ${JSON.stringify(pathToFileURL(join(process.cwd(), 'src/storage.ts')).href)};
+      import { writeFile } from 'node:fs/promises';
+      const store = new Store(process.argv[1]); process.stdout.write('attempting');
+      await store.operation('shared', () => writeFile(process.argv[2], 'acquired'));`;
+    child = spawn(process.execPath, ['--input-type=module', '-e', script, dir, marker], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = ''; child.stderr!.on('data', d => stderr += d);
+    exited = new Promise((resolve, reject) => { child!.once('error', reject); child!.once('exit', code => code === 0 ? resolve(code) : reject(new Error(stderr))); });
+    await new Promise<void>(resolve => child!.stdout!.once('data', () => resolve()));
+    await new Promise(r => setTimeout(r, 80));
+    await assert.rejects(readFile(marker), { code: 'ENOENT' }, 'second process cannot enter before credential operation completes');
+  });
+  assert.equal(await exited, 0); assert.equal(await readFile(marker, 'utf8'), 'acquired');
+  await assert.rejects(store.operation('shared', async () => { throw new Error('synthetic-failure'); }));
+  assert.equal(await store.operation('shared', async () => 'released'), 'released');
+});
+
 test('Pi native runtime integration: cached startup, user overrides, max, no prompt_cache_options', async t => {
   const dir = await directory(t); const store = new Store(dir); const root = 'https://example.test';
   const credential = { type: 'api_key', key: 'test-key', env: { PI_GATEWAY_URL: root } };
