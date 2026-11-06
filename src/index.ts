@@ -11,20 +11,25 @@ import { modelDetails } from './model-info.ts';
 
 const ACTIONS = [
   { id: 'add', label: '添加服务', description: '创建服务，填写服务 ID、URL 和 Key' },
-  { id: 'edit', label: '编辑服务', description: '修改 URL 或 Key' },
+  { id: 'edit', label: '编辑服务', description: '连接、上游目录与协议诊断' },
   { id: 'refresh', label: '刷新模型', description: '重新从硬盘读取模型配置' },
   { id: 'info', label: '模型信息', description: '查看模型配置' },
   { id: 'model', label: '编辑模型', description: '修改模型配置' },
   { id: 'remove', label: '删除服务', description: '删除服务及其凭据和缓存' },
 ] as const;
-const actionLabel = (a: typeof ACTIONS[number]) => `${a.label}  ${a.description}`;
+const actionLabel = (a: { label: string; description: string }) => `${a.label}  ${a.description}`;
+const SERVICE_ACTIONS = [
+  { id: 'connection', label: '连接配置', description: '修改 URL、Key 或服务协议，不发出生成请求' },
+  { id: 'catalog', label: '更新上游目录', description: '使用已有凭据读取目录，不发出生成请求' },
+  { id: 'diagnose', label: '协议诊断', description: '选择模型并确认后探测，可能计费' },
+] as const;
 
 export default async function gatewayExtension(pi: ExtensionAPI) {
   const store = new Store(getAgentDir());
   const handles = new Map<string, GatewayHandle>();
   const connections = new Map<string, Connection>();
   const lifecycle = new AbortController();
-  const authHandles = new Set<GatewayHandle>();
+  const temporaryHandles = new Set<GatewayHandle>();
   let busy = false;
   const offline = /^(1|true|yes)$/i.test(process.env.PI_OFFLINE ?? '');
   async function register(c: Connection, allowNetwork = !offline) {
@@ -49,7 +54,7 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
   };
   const authRuntime = async (c: Connection, expected: Connection | null = c, ctx?: ExtensionCommandContext) => {
     const runtime = await ModelRuntime.create({ modelsPath: null, authPath: join(store.dir, 'auth.json'), modelsStore: new InMemoryModelsStore(), refreshOnCreate: false, allowModelNetwork: false });
-    const h = createGateway(c, store, expected, ctx ? (message, signal, work) => progress(ctx, message, signal, work) : undefined); authHandles.add(h);
+    const h = createGateway(c, store, expected, ctx ? (message, signal, work) => progress(ctx, message, signal, work) : undefined); temporaryHandles.add(h);
     runtime.registerNativeProvider(h.provider);
     await runtime.refresh({ providers: [c.id], allowNetwork: false });
     return runtime;
@@ -72,14 +77,52 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
     await apply(ctx, c);
     if (notify) ctx.ui.notify(`「模型已刷新」${ctx.modelRegistry.getAll().filter(m => m.provider === c.id).length} 个模型`, 'info');
   }
+  async function editService(ctx: ExtensionCommandContext, c: Connection) {
+    const selected = await ctx.ui.select(`编辑服务 · ${c.id}`, SERVICE_ACTIONS.map(actionLabel), { signal: lifecycle.signal });
+    const task = SERVICE_ACTIONS.find(a => actionLabel(a) === selected)?.id;
+    if (!task) return;
+    if (offline) throw new Error('离线模式不能修改连接、更新上游目录或诊断协议；本地「刷新模型」仍可用');
+    if (task === 'connection') {
+      const runtime = await authRuntime(c, c, ctx);
+      await runtime.login(c.id, 'api_key', interaction(ctx, lifecycle.signal));
+      const saved = (await store.registry()).connections.find(x => x.id === c.id)!;
+      const h = await register(saved, false); await apply(ctx, saved);
+      ctx.ui.notify('「连接已保存」模型已自动刷新。', 'info');
+      if (h.info().unknown.length) ctx.ui.notify(`「协议待确认」${h.info().unknown.length} 个模型未注册；可选择「协议诊断」或编辑模型的「协议偏好」。`, 'warning');
+      return;
+    }
+    const h = createGateway(c, store); temporaryHandles.add(h);
+    await h.initialize(lifecycle.signal, false);
+    const network = <T>(message: string, timeout: number, work: (signal: AbortSignal, report: (message: string) => void) => Promise<T>) => progress(ctx, message, AbortSignal.any([lifecycle.signal, AbortSignal.timeout(timeout)]), work);
+    if (task === 'catalog') {
+      await network('正在读取模型目录与协议声明…', 60000, (signal, report) => h.updateCatalog(signal, report));
+      await register(c, false); await apply(ctx, c);
+      ctx.ui.notify(`「上游目录已更新」${h.info().models.length} 个可用模型，${h.info().unknown.length} 个协议待确认；未发出生成请求。`, 'info');
+      return;
+    }
+    const ids = [...h.info().models.map(m => m.id), ...h.info().unknown];
+    if (!ids.length) { ctx.ui.notify('「暂无模型目录」请先选择「更新上游目录」。', 'warning'); return; }
+    const scope = await ctx.ui.select('协议诊断 · 选择范围', ['单个模型', `全部模型  当前目录的 ${ids.length} 个模型`], { signal: lifecycle.signal });
+    if (!scope) return;
+    const id = scope === '单个模型' ? await ctx.ui.select('协议诊断 · 选择模型', ids, { signal: lifecycle.signal }) : undefined;
+    if (scope === '单个模型' && !id) return;
+    const targets = new Set(id ? [id] : ids);
+    const consent = '开始诊断  已发送的请求与费用无法撤销';
+    if (await ctx.ui.select(`协议诊断 · ${id ?? `全部 ${targets.size} 个模型`} · 最多 ${targets.size * PROTOCOLS.length} 次请求，可能计费`, ['取消', consent], { signal: lifecycle.signal }) !== consent) return;
+    const results = await network('正在逐模型探测协议…', 600000, (signal, report) => h.diagnose(targets, signal, report));
+    const failed = results.filter(r => !r.ok);
+    if (failed.length) ctx.ui.notify(`${failed.length} 次探测未确认支持；已有证据保留。${failed.map(r => `${r.model} / ${r.api}: ${r.reason ?? '未知'}`).join('；')}`, 'warning');
+    await register(c, false); await apply(ctx, c);
+    ctx.ui.notify('「协议诊断已完成」结果已保存并应用；服务与模型协议指定保持不变。', 'info');
+  }
   async function editModel(ctx: ExtensionCommandContext, c: Connection) {
     const handle = handles.get(c.id)!;
     const ids = [...new Set([...ctx.modelRegistry.getAll().filter(m => m.provider === c.id).map(m => m.id), ...handle.info().unknown])];
-    if (!ids.length) { ctx.ui.notify('「暂无模型」请先编辑服务，读取模型目录。', 'warning'); return; }
+    if (!ids.length) { ctx.ui.notify('「暂无模型」请先选择「编辑服务 → 更新上游目录」。', 'warning'); return; }
     const id = await ctx.ui.select('编辑模型', ids); if (!id) return;
-    const mode = await ctx.ui.select(`编辑模型 · ${id}`, ['模型参数  编辑原生 models.json 覆盖', '协议  自动选择或手动指定']);
+    const mode = await ctx.ui.select(`编辑模型 · ${id}`, ['模型参数  编辑原生 models.json 覆盖', '协议偏好  高级：自动选择或手动指定']);
     if (!mode) return;
-    if (mode.startsWith('协议  ')) {
+    if (mode.startsWith('协议偏好  ')) {
       const selected = await ctx.ui.select('模型协议 ·「自动」使用服务设置或发现结果', ['自动', ...PROTOCOLS]);
       if (!selected) return;
       const updated = structuredClone(c); updated.modelProtocols ??= {};
@@ -146,13 +189,8 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
     await store.operation(c.id, async () => {
       const current = (await store.registry()).connections.find(x => x.id === c.id);
       if (JSON.stringify(current) !== JSON.stringify(c)) throw new Error('服务已被其他会话修改，请 /reload 后重试；未修改凭据或配置');
-      if (action === 'edit') {
-        if (offline) throw new Error('离线模式不能编辑服务');
-        const runtime = await authRuntime(c, c, ctx); await runtime.login(c.id, 'api_key', interaction(ctx, lifecycle.signal));
-        const saved = (await store.registry()).connections.find(x => x.id === c.id)!;
-        await register(saved, false); await apply(ctx, saved);
-        ctx.ui.notify('「服务已保存」模型已自动刷新。', 'info');
-      } else if (action === 'refresh') await diskRefresh(ctx, c);
+      if (action === 'edit') await editService(ctx, c);
+      else if (action === 'refresh') await diskRefresh(ctx, c);
       else if (action === 'model') await editModel(ctx, c);
       else if (action === 'remove') {
         if (ctx.model?.provider === c.id) throw new Error('请先通过 /model 切换到其他服务，再删除当前服务');
@@ -171,7 +209,7 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
       busy = true;
       try { await command(args, ctx); }
       catch (e) { ctx.ui.notify(clean(e instanceof Error ? e.message : 'Gateway 操作失败'), 'error'); }
-      finally { for (const h of authHandles) h.dispose(); authHandles.clear(); busy = false; }
+      finally { for (const h of temporaryHandles) h.dispose(); temporaryHandles.clear(); busy = false; }
     },
   });
 }

@@ -183,7 +183,7 @@ export function chatRow(row: Row): boolean {
 export interface DiscoveryOptions {
   probe?: boolean;
   previous?: Discovery;
-  // Reuse exactly the catalog and unknown IDs shown in the paid-probe consent.
+  // Reuse exactly the catalog and model IDs shown in the paid-probe consent.
   rows?: Row[];
   probeModels?: ReadonlySet<string>;
   probeDeclared?: boolean;
@@ -197,15 +197,22 @@ export async function discover(root: string, key: string, signal: AbortSignal, o
   let step = 0;
   const controller = new AbortController();
   const workSignal = AbortSignal.any([signal, controller.signal]);
-  // Only missing declarations need POST probes. Limit concurrency, not model coverage.
+  // Declared protocols avoid automatic probes; explicit diagnosis can retest them.
   const jobs = rows.map(row => async () => {
     workSignal.throwIfAborted();
     const id = String(row.id); const declared = declaredProtocols(row);
-    if (declared.length && !options.probeDeclared) { protocols[id] = declared; evidence[id] = 'endpoint'; return; }
-    if (options.previous?.protocols[id]?.length && (!options.probe || options.probeModels && !options.probeModels.has(id))) {
-      protocols[id] = options.previous.protocols[id]; evidence[id] = options.previous.evidence[id]; return;
+    const previous = options.previous?.protocols[id] ?? [];
+    if (options.probe && options.probeModels && !options.probeModels.has(id)) {
+      if (options.previous?.protocols[id]) protocols[id] = previous;
+      if (options.previous?.evidence[id]) evidence[id] = options.previous.evidence[id];
+      return;
     }
-    if (!options.probe || options.probeModels && !options.probeModels.has(id)) return;
+    const known = [...new Set([...declared, ...previous])];
+    const knownEvidence = previous.some(api => !declared.includes(api)) ? options.previous!.evidence[id] : declared.length ? 'endpoint' : options.previous?.evidence[id];
+    if (!options.probe || declared.length && !options.probeDeclared) {
+      if (known.length) { protocols[id] = known; evidence[id] = knownEvidence ?? 'unknown'; }
+      return;
+    }
     const results: ProbeResult[] = [];
     for (const api of preference(id)) {
       workSignal.throwIfAborted(); options.report?.(`探测 ${id}（${++step}/${total}）：${api}…`);
@@ -213,8 +220,8 @@ export async function discover(root: string, key: string, signal: AbortSignal, o
     }
     const succeeded = results.filter(r => r.ok).map(r => r.api);
     probes.push(...results);
-    protocols[id] = [...new Set([...declared, ...(options.previous?.protocols[id] ?? []), ...succeeded])];
-    evidence[id] = succeeded.length ? 'probe' : declared.length ? 'endpoint' : options.previous?.evidence[id] ?? 'unknown';
+    protocols[id] = [...new Set([...known, ...succeeded])];
+    evidence[id] = succeeded.length ? 'probe' : knownEvidence ?? 'unknown';
   });
   let cursor = 0;
   // Await ALL workers even on cancellation/failure; no hidden probes after UI dismissal.

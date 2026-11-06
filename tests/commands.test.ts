@@ -21,24 +21,29 @@ async function fixture(t: TestContext, seed?: (store: Store, root: string) => Pr
   await atomicJson(join(dir, 'cache/gateway/models-dev.json'), { checkedAt: Date.now(), data: {} });
   const state = {
     catalog: [{ id: modelId, native_endpoints: ['/v1/responses', '/v1/chat/completions'] }] as Row[],
-    status: 200, requests: [] as string[], inputs: [] as (string | undefined)[], idle: true,
+    status: 200, requests: [] as string[], urls: [] as string[], requestBodies: [] as Row[], inputs: [] as (string | undefined)[], idle: true,
     progress: [] as string[], loader: undefined as any,
-    onRequest: undefined as ((method: string, url?: string) => boolean) | undefined,
+    onRequest: undefined as ((method: string, url?: string) => boolean | Promise<boolean>) | undefined,
     selects: [] as (string | undefined)[], secrets: [] as (string | undefined)[], edits: [] as (string | undefined)[], views: [] as string[],
     onEditor: undefined as (() => Promise<void>) | undefined,
     prompts: [] as { message: string; placeholder?: string; choices?: string[] }[],
     notices: [] as { message: string; kind: string }[], secretProviders: [] as string[][],
     onSecret: undefined as (() => Promise<void>) | undefined,
+    onSelect: undefined as ((message: string) => Promise<void>) | undefined,
   };
   const server = createServer((req, res) => {
-    state.requests.push(req.method!);
-    if (state.onRequest?.(req.method!, req.url)) return;
-    res.writeHead(state.status, { 'content-type': 'application/json' });
-    const response = req.method !== 'POST' ? { data: state.catalog }
-      : req.url?.endsWith('/responses') ? { object: 'response', output: [], status: 'completed' }
-      : req.url?.endsWith('/messages') ? { type: 'message', content: [] }
-      : req.url?.includes(':generateContent') ? { candidates: [{}] } : { choices: [{ message: {} }] };
-    res.end(JSON.stringify(response));
+    let body = ''; req.setEncoding('utf8'); req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      state.requests.push(req.method!); state.urls.push(req.url!);
+      if (req.method === 'POST') state.requestBodies.push(JSON.parse(body));
+      if (await state.onRequest?.(req.method!, req.url)) return;
+      res.writeHead(state.status, { 'content-type': 'application/json' });
+      const response = req.method !== 'POST' ? { data: state.catalog }
+        : req.url?.endsWith('/responses') ? { object: 'response', output: [], status: 'completed' }
+        : req.url?.endsWith('/messages') ? { type: 'message', content: [] }
+        : req.url?.includes(':generateContent') ? { candidates: [{}] } : { choices: [{ message: {} }] };
+      res.end(JSON.stringify(response));
+    });
   });
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const root = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -68,7 +73,7 @@ async function fixture(t: TestContext, seed?: (store: Store, root: string) => Pr
     ui: {
       input: async (message: string, placeholder?: string) => { state.prompts.push({ message, placeholder }); return state.inputs.shift(); },
       select: async (message: string, choices: string[]) => {
-        state.prompts.push({ message, choices }); const requested = state.selects.shift();
+        state.prompts.push({ message, choices }); await state.onSelect?.(message); const requested = state.selects.shift();
         if (requested === undefined) return undefined;
         const choice = choices.find(c => c === requested || c.startsWith(requested + '  '));
         assert(choice, `selection ${requested} missing in ${choices.join(',')}`); return choice;
@@ -118,11 +123,12 @@ async function fixture(t: TestContext, seed?: (store: Store, root: string) => Pr
     state.inputs.push(id, root); state.secrets.push(key);
     await run('add');
   }
-  async function probe(error?: RegExp) {
-    state.inputs.push(''); state.secrets.push(''); state.selects.push('探测协议');
+  async function probe(error?: RegExp, id: string | null = modelId) {
+    state.selects.push('协议诊断', id ? '单个模型' : '全部模型', ...(id ? [id] : []), '开始诊断');
     await run('edit service', error);
   }
-  return { state, dir, root, store, runtime, registered, ctx, load, run, add, probe, command: () => command };
+  async function update(error?: RegExp) { state.selects.push('更新上游目录'); await run('edit service', error); }
+  return { state, dir, root, store, runtime, registered, ctx, load, run, add, probe, update, command: () => command };
 }
 
 test('Gateway has only real actions and keeps risk warnings at the actual operation', async t => {
@@ -133,10 +139,13 @@ test('Gateway has only real actions and keeps risk warnings at the actual operat
   await f.run('');
   const menu = f.state.prompts.findLast(p => p.message === 'Gateway')!;
   assert.deepEqual(menu.choices!.map(c => c.split('  ')[0]), ['添加服务', '编辑服务', '刷新模型', '模型信息', '编辑模型', '删除服务']);
-  assert(!menu.choices!.join('').match(/不管理|上游|稳定 ID|返回|协议覆盖|探测协议/));
-  f.state.inputs.push(''); f.state.secrets.push(''); f.state.selects.push('取消'); await f.run('edit service', /已取消/);
+  assert(!menu.choices!.join('').match(/不管理|稳定 ID|返回|可能计费/));
+  await f.run('edit service');
+  assert.deepEqual(f.state.prompts.at(-1)!.choices!.map(c => c.split('  ')[0]), ['连接配置', '更新上游目录', '协议诊断']);
+  f.state.selects.push('协议诊断', '单个模型', modelId, '取消'); await f.run('edit service');
+  assert.equal(f.state.prompts.at(-1)!.choices![0], '取消');
   assert.match(f.state.prompts.at(-1)!.message, /最多 4 次请求，可能计费/);
-  assert.equal(f.state.requests.length, requests + 1, 'editing reads a catalog but cancelled consent sends no probe');
+  assert.equal(f.state.requests.length, requests, 'cancelled diagnostics needs neither a catalog fetch nor a generation probe');
   f.state.selects.push('取消'); await f.run('remove service');
   assert.equal(f.state.prompts.at(-1)!.choices![0], '取消');
   assert.equal(await readFile(join(f.dir, 'auth.json'), 'utf8'), auth);
@@ -184,11 +193,11 @@ test('terminal workflow: add/edit/info/model/refresh/remove; no key in notificat
   await f.add('service');
   await assert.rejects(f.runtime.getProvider('service')!.auth.apiKey!.login!({ prompt: async () => { throw new Error('must not prompt'); }, notify: () => {} } as any), /gateway edit service.*遮罩/);
   f.state.selects.push(modelId); await f.run('info service');
-  f.state.selects.push(modelId, '协议', 'openai-completions'); await f.run('model service');
+  f.state.selects.push(modelId, '协议偏好', 'openai-completions'); await f.run('model service');
   assert.equal(f.runtime.getModel('service', modelId)?.api, 'openai-completions');
   await f.run('refresh service');
   const promptStart = f.state.prompts.length;
-  f.state.selects.push('编辑服务', '保持当前设置'); f.state.inputs.push(''); f.state.secrets.push(''); await f.run('');
+  f.state.selects.push('编辑服务', '连接配置', '保持当前设置'); f.state.inputs.push(''); f.state.secrets.push(''); await f.run('');
   assert(!f.state.prompts.slice(promptStart + 1).some(p => p.message.includes('服务 ID')), 'edit never offers an ID rename');
   assert.equal(f.runtime.getModel('service', modelId)?.api, 'openai-completions');
   assert.equal(JSON.parse(await readFile(join(f.dir, 'auth.json'), 'utf8')).service.key, key);
@@ -202,7 +211,7 @@ test('terminal workflow: add/edit/info/model/refresh/remove; no key in notificat
 test('service picker contains only persisted services and edit keeps the selected ID', async t => {
   const f = await fixture(t);
   await f.add('one'); await f.add('two');
-  f.state.selects.push('编辑服务', 'two', '保持当前设置'); f.state.inputs.push(''); f.state.secrets.push('replacement-key');
+  f.state.selects.push('编辑服务', 'two', '连接配置', '保持当前设置'); f.state.inputs.push(''); f.state.secrets.push('replacement-key');
   await f.run('');
   assert.deepEqual(f.state.prompts.find(p => p.message === '选择服务 ID')?.choices, ['one', 'two']);
   const auth = JSON.parse(await readFile(join(f.dir, 'auth.json'), 'utf8'));
@@ -287,16 +296,20 @@ test('only a real open Gateway dialog holds the command lock, cancellation relea
   await f.run(''); assert.equal(f.state.notices.length, count);
 });
 
-test('protocol detection renders native progress for the catalog and each of four protocols', async t => {
+test('protocol diagnosis reuses stored credentials and shows each of four native protocol steps', async t => {
   const f = await fixture(t);
   await f.add('service');
+  f.state.progress.length = 0;
+  const requestStart = f.state.requests.length, promptStart = f.state.prompts.length;
   await f.probe();
   const rendered = f.state.progress.join('\n');
-  assert.match(rendered, /正在读取模型目录/);
+  assert(!rendered.match(/读取模型目录|公开元数据/));
+  assert(!f.state.prompts.slice(promptStart).some(p => p.message.includes('URL') || p.message.includes('API Key')));
+  assert(!f.state.requests.slice(requestStart).includes('GET'));
   for (const [index, api] of ['openai-responses', 'openai-completions', 'anthropic-messages', 'google-generative-ai'].entries()) {
     assert(rendered.includes(`（${index + 1}/4）：${api}`), rendered);
   }
-  assert.match(rendered, /正在解析模型能力/); assert.match(rendered, /「Esc」取消/);
+  assert.match(rendered, /「Esc」取消/);
   assert.equal(f.state.requests.filter(m => m === 'POST').length, 4);
   assert.equal(f.state.loader, undefined);
   assert(!rendered.includes(key));
@@ -317,10 +330,10 @@ test('Escape aborts in-flight protocol detection without saving or leaving a bus
   f.state.selects.push(modelId); await f.run('info service');
 });
 
-test('failed protocol discovery dismisses the loader and preserves the last valid cache', async t => {
+test('failed upstream catalog update dismisses the loader and preserves the last valid cache', async t => {
   const f = await fixture(t);
   await f.add('service'); const before = await readFile(f.store.cachePath('service'), 'utf8');
-  f.state.status = 503; await f.probe(/HTTP 503/);
+  f.state.status = 503; await f.update(/HTTP 503/);
   assert.equal(f.state.loader, undefined); assert.equal(await readFile(f.store.cachePath('service'), 'utf8'), before);
   assert.match(f.state.progress.join(''), /正在读取模型目录/);
 });
@@ -345,6 +358,7 @@ test('add and edit catalog requests have cancellable native progress and preserv
     const beforeAuth = await readFile(join(f.dir, 'auth.json'), 'utf8');
     const beforeCache = await readFile(f.store.cachePath('service'), 'utf8').catch(() => undefined);
     f.state.inputs.push(...(action === 'add' ? ['service', f.root] : [''])); f.state.secrets.push(key);
+    if (action === 'edit') f.state.selects.push('连接配置', '保持当前设置');
     f.state.onRequest = () => { f.state.loader.handleInput('\x1b'); return true; };
     await f.run(action === 'add' ? 'add' : 'edit service', /已取消 Gateway 操作/);
     assert.match(f.state.progress.join('\n'), /正在读取模型目录与协议声明/);
@@ -396,7 +410,7 @@ test('batch probes use only the consented catalog, report progress, and cancella
 test('probe results keep evidence separate from model selection and native overrides', async t => {
   const f = await fixture(t);
   await f.add('service');
-  f.state.selects.push(modelId, '协议', 'openai-completions'); await f.run('model service');
+  f.state.selects.push(modelId, '协议偏好', 'openai-completions'); await f.run('model service');
   await f.probe();
   f.state.selects.push(modelId); await f.run('info service');
   const message = f.state.views.at(-1)!;
@@ -417,6 +431,7 @@ test('partial probe failures keep known support and report native user protocol 
   });
   await f.add('service');
   f.state.catalog = [{ id: modelId, supported_endpoint_types: ['anthropic'] }];
+  await f.update();
   f.state.onRequest = (method, url) => { f.state.status = method === 'POST' && url?.endsWith('/responses') ? 503 : 200; return false; };
   await f.probe();
   const saved = JSON.parse(await readFile(f.store.cachePath('service'), 'utf8'));
@@ -462,12 +477,12 @@ test('stored gateway ID, native model overrides and history are ordinary data, n
   const before = await Promise.all(paths.map(p => readFile(p, 'utf8')));
   assert.deepEqual([...f.registered], ['gateway']);
   await f.load(); assert.deepEqual(await Promise.all(paths.map(p => readFile(p, 'utf8'))), before);
-  f.state.inputs.push(f.root); f.state.secrets.push(undefined); await f.run('edit gateway', /取消/);
+  f.state.selects.push('连接配置'); f.state.inputs.push(f.root); f.state.secrets.push(undefined); await f.run('edit gateway', /取消/);
   assert.deepEqual(await Promise.all(paths.map(p => readFile(p, 'utf8'))), before);
-  f.state.status = 401; f.state.inputs.push(f.root); f.state.secrets.push('bad-key'); await f.run('edit gateway', /HTTP 401/);
+  f.state.status = 401; f.state.selects.push('连接配置', '保持当前设置'); f.state.inputs.push(f.root); f.state.secrets.push('bad-key'); await f.run('edit gateway', /HTTP 401/);
   assert.deepEqual(await Promise.all(paths.map(p => readFile(p, 'utf8'))), before);
   assert(f.runtime.getModel('gateway', modelId));
-  f.state.status = 200; f.state.inputs.push(''); f.state.secrets.push('new-key'); f.state.selects.push('保持当前设置'); await f.run('edit gateway');
+  f.state.status = 200; f.state.inputs.push(''); f.state.secrets.push('new-key'); f.state.selects.push('连接配置', '保持当前设置'); await f.run('edit gateway');
   assert.deepEqual((await f.store.registry()).connections, JSON.parse(before[0]).connections.map((c: Row) => ({ ...c, url: f.root })));
   assert.equal(JSON.parse(await readFile(join(f.dir, 'auth.json'), 'utf8')).gateway.key, 'new-key');
   assert.deepEqual(await Promise.all(paths.slice(3).map(p => readFile(p, 'utf8'))), before.slice(3));
@@ -559,13 +574,216 @@ test('Edit Model refuses an external file conflict and an invalid whole-file con
   assert.equal(f.runtime.getModel('service', modelId), live, 'invalid disk refresh leaves current model registry intact');
 });
 
-test('Edit Service defaults to cancel before probes; all failed probes preserve all saved state', async t => {
+test('upstream catalog update uses existing credentials, publishes unknown/empty catalogs, and never writes connection data', async t => {
+  const f = await fixture(t); await f.add('service');
+  const files = [f.store.registryPath, join(f.dir, 'auth.json'), join(f.dir, 'models.json'), join(f.dir, 'sessions/keep.jsonl')];
+  await atomicJson(files[2], { providers: { service: { modelOverrides: { [modelId]: { contextWindow: 240000 } } } } });
+  await atomicJson(files[3], { synthetic: 'keep-history' });
+  const before = await Promise.all(files.map(p => readFile(p, 'utf8')));
+  const prompts = f.state.prompts.length, requests = f.state.requests.length, secrets = f.state.secretProviders.length;
+  f.state.catalog.push({ id: 'unknown-protocol-model' });
+  await f.update();
+  assert.deepEqual(f.state.requests.slice(requests), ['GET']);
+  assert.equal(f.state.secretProviders.length, secrets);
+  assert(!f.state.prompts.slice(prompts).some(p => p.message.includes('URL') || p.message.includes('API Key')));
+  assert.equal(f.runtime.getModel('service', modelId)?.contextWindow, 240000);
+  assert.equal(f.runtime.getModel('service', 'unknown-protocol-model'), undefined);
+  assert.match(f.state.notices.at(-1)!.message, /1 个可用模型，1 个协议待确认/);
+  const cached = JSON.parse(await readFile(f.store.cachePath('service'), 'utf8'));
+  assert(cached.discovery.rows.some((r: Row) => r.id === 'unknown-protocol-model'));
+  f.state.selects.push('协议诊断', '单个模型'); await f.run('edit service');
+  assert(f.state.prompts.at(-1)!.choices!.includes('unknown-protocol-model'), 'unknown models are selectable without registering or re-entering credentials');
+  f.state.catalog = []; await f.update();
+  assert.equal(f.runtime.getModels().filter(m => m.provider === 'service').length, 0);
+  assert.deepEqual(JSON.parse(await readFile(f.store.cachePath('service'), 'utf8')).discovery.rows, []);
+  assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
+});
+
+test('connection edits keep service/model protocol controls but never include paid diagnosis', async t => {
+  const f = await fixture(t); await f.add('service');
+  f.state.selects.push(modelId, '协议偏好', 'anthropic-messages'); await f.run('model service');
+  for (const selection of ['openai-completions', '自动']) {
+    f.state.inputs.push(''); f.state.secrets.push('replacement-key');
+    f.state.selects.push('连接配置', selection); await f.run('edit service');
+    const c = (await f.store.registry()).connections[0];
+    assert.equal(c.protocol, selection === '自动' ? undefined : selection);
+    assert.equal(c.modelProtocols?.[modelId], 'anthropic-messages');
+    assert.equal(f.runtime.getModel('service', modelId)?.api, 'anthropic-messages');
+  }
+  // A changed connection with unknown protocols can be saved, then diagnosed as
+  // a separate task. Do not force a paid probe or silently guess an API.
+  f.state.catalog = [{ id: 'unknown-protocol-model' }];
+  f.state.inputs.push(''); f.state.secrets.push('another-key'); f.state.selects.push('连接配置', '保持当前设置');
+  await f.run('edit service');
+  assert.equal(JSON.parse(await readFile(join(f.dir, 'auth.json'), 'utf8')).service.key, 'another-key');
+  assert.equal(f.runtime.getModels().filter(m => m.provider === 'service').length, 0);
+  assert.match(f.state.notices.at(-1)!.message, /协议待确认/);
+  assert(f.state.requests.every(m => m === 'GET'));
+  await f.probe(undefined, 'unknown-protocol-model');
+  assert(f.runtime.getModel('service', 'unknown-protocol-model'));
+});
+
+test('single-model diagnosis freezes the consented scope, keeps other evidence/catalog age, and preserves native protocol overrides', async t => {
+  const f = await fixture(t, async (store, root) => {
+    await atomicJson(join(store.dir, 'models.json'), { providers: { service: { baseUrl: root, models: [{ id: modelId, api: 'anthropic-messages' }] } } });
+  });
+  await f.add('service');
+  f.state.catalog.push({ id: 'other-model', native_endpoints: ['/v1/responses'] }, { id: 'unknown-unselected' }); await f.update();
+  const cache = JSON.parse(await readFile(f.store.cachePath('service'), 'utf8'));
+  cache.checkedAt -= 10000;
+  cache.discovery.protocols['other-model'] = ['openai-responses', 'google-generative-ai'];
+  cache.discovery.evidence['other-model'] = 'probe';
+  cache.discovery.protocols['unknown-unselected'] = []; cache.discovery.evidence['unknown-unselected'] = 'unknown';
+  const otherProbe = { model: 'other-model', api: 'google-generative-ai', ok: true, status: 200 };
+  cache.discovery.probes = [otherProbe];
+  await f.store.save('service', cache);
+  const files = [f.store.registryPath, join(f.dir, 'auth.json'), join(f.dir, 'models.json')];
+  const before = await Promise.all(files.map(p => readFile(p, 'utf8')));
+  const requests = f.state.requests.length, bodies = f.state.requestBodies.length;
+  f.state.onSelect = async message => { if (message.includes('最多 4 次请求')) f.state.catalog.push({ id: 'not-in-consent' }); };
+  await f.probe();
+  assert.deepEqual(f.state.requests.slice(requests), ['POST', 'POST', 'POST', 'POST']);
+  assert(f.state.requestBodies.slice(bodies).every(body => body.model === undefined || body.model === modelId));
+  assert(f.state.urls.at(-1)!.includes(encodeURIComponent(modelId)));
+  const saved = JSON.parse(await readFile(f.store.cachePath('service'), 'utf8'));
+  assert.equal(saved.checkedAt, cache.checkedAt, 'diagnosis does not pretend that the upstream catalog was refreshed');
+  assert.deepEqual(saved.discovery.rows, cache.discovery.rows);
+  assert.deepEqual(saved.discovery.protocols['other-model'], cache.discovery.protocols['other-model']);
+  assert.equal(saved.discovery.evidence['other-model'], 'probe');
+  assert.deepEqual(saved.discovery.protocols['unknown-unselected'], []);
+  assert.equal(saved.discovery.evidence['unknown-unselected'], 'unknown');
+  assert.deepEqual(saved.discovery.probes.filter((r: Row) => r.model === 'other-model'), [otherProbe]);
+  assert.equal(saved.discovery.probes.filter((r: Row) => r.model === modelId).length, 4);
+  assert.equal(f.runtime.getModel('service', modelId)?.api, 'anthropic-messages');
+  assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
+});
+
+test('all-model diagnosis is bounded by cached consent; cancellation settles every worker before returning', async t => {
+  for (const cancel of [false, true]) await t.test(cancel ? 'cancel' : 'success', async t => {
+    const f = await fixture(t); await f.add('service');
+    f.state.catalog = Array.from({ length: cancel ? 8 : 2 }, (_, i) => ({ id: `${modelId}-${i}`, native_endpoints: ['/v1/responses'] }));
+    await f.update();
+    const files = [f.store.registryPath, join(f.dir, 'auth.json'), f.store.cachePath('service')];
+    const before = await Promise.all(files.map(p => readFile(p, 'utf8')));
+    let started = 0;
+    const nativeFetch = globalThis.fetch;
+    t.mock.method(globalThis, 'fetch', (...args: Parameters<typeof fetch>) => {
+      if (args[1]?.method === 'POST') started++;
+      return nativeFetch(...args);
+    });
+    const requests = f.state.requests.length;
+    f.state.onSelect = async message => { if (message.includes('最多')) f.state.catalog.push({ id: 'not-in-consent' }); };
+    f.state.onRequest = method => { if (method === 'POST' && cancel) { f.state.loader.handleInput('\x1b'); return true; } return false; };
+    await f.probe(cancel ? /已取消 Gateway 操作/ : undefined, null);
+    const atReturn = started;
+    await new Promise(r => setTimeout(r, 50));
+    assert.equal(started, atReturn, 'no fetch starts after cancellation/command completion');
+    assert(f.state.requests.slice(requests).every(m => m === 'POST'));
+    assert.equal(f.state.loader, undefined);
+    if (cancel) {
+      assert(started > 0 && started <= 3);
+      assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
+      f.state.selects.push(modelId + '-0'); await f.run('info service');
+    } else {
+      assert.equal(started, 8);
+      assert.match(f.state.progress.join('\n'), /8\/8/);
+      assert.deepEqual(await Promise.all(files.slice(0, 2).map(p => readFile(p, 'utf8'))), before.slice(0, 2));
+    }
+  });
+});
+
+test('diagnosis cancellation at every selection step is local and preserves all saved bytes', async t => {
+  const f = await fixture(t); await f.add('service');
+  const files = [f.store.registryPath, join(f.dir, 'auth.json'), f.store.cachePath('service')];
+  const before = await Promise.all(files.map(p => readFile(p, 'utf8'))), requests = f.state.requests.length;
+  for (const choices of [[], ['协议诊断'], ['协议诊断', '单个模型'], ['协议诊断', '单个模型', modelId], ['协议诊断', '全部模型', '取消']]) {
+    f.state.selects.push(...choices); await f.run('edit service');
+    assert.equal(f.state.requests.length, requests);
+    assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
+  }
+  const consent = f.state.prompts.at(-1)!;
+  assert.equal(consent.choices![0], '取消');
+  assert.match(consent.message, /最多 4 次请求，可能计费/);
+  assert.match(consent.choices![1], /费用无法撤销/);
+});
+
+test('catalog updates and diagnoses reject stale connections or credentials before committing results', async t => {
+  for (const task of ['更新上游目录', '协议诊断']) for (const change of ['connection', 'credential']) await t.test(`${task}/${change}`, async t => {
+    const f = await fixture(t); await f.add('service');
+    const before = await readFile(f.store.cachePath('service'), 'utf8');
+    let changed = false;
+    f.state.onRequest = async () => {
+      if (!changed) {
+        changed = true;
+        if (change === 'connection') {
+          const c = (await f.store.registry()).connections[0]; await f.store.put({ ...c, protocol: 'openai-completions' }, c);
+        } else await atomicJson(join(f.dir, 'auth.json'), { service: { type: 'api_key', key: 'rotated', env: { PI_GATEWAY_URL: f.root } } });
+      }
+      return false;
+    };
+    const error = change === 'connection' ? /其他会话修改.*未写入/ : /凭据已改变.*未写入/;
+    if (task === '更新上游目录') await f.update(error); else await f.probe(error);
+    assert.equal(await readFile(f.store.cachePath('service'), 'utf8'), before);
+    assert.equal(f.state.loader, undefined);
+  });
+});
+
+test('a credential change after model selection prevents any generation request', async t => {
+  const f = await fixture(t); await f.add('service');
+  const before = await readFile(f.store.cachePath('service'), 'utf8'), requests = f.state.requests.length;
+  f.state.onSelect = async message => {
+    if (message.includes('最多')) await atomicJson(join(f.dir, 'auth.json'), { service: { type: 'api_key', key: 'rotated', env: { PI_GATEWAY_URL: f.root } } });
+  };
+  await f.probe(/目录或凭据已变化/);
+  assert.equal(f.state.requests.length, requests);
+  assert.equal(await readFile(f.store.cachePath('service'), 'utf8'), before);
+});
+
+test('missing cache or credentials requires an explicit repair task, never implicit fetch/login', async t => {
+  const f = await fixture(t); await f.add('service');
+  const requests = f.state.requests.length, prompts = f.state.prompts.length, secrets = f.state.secretProviders.length;
+  const live = f.runtime.getModel('service', modelId);
+  await rm(f.store.cachePath('service'));
+  f.state.selects.push('协议诊断'); await f.run('edit service');
+  assert.match(f.state.notices.at(-1)!.message, /暂无模型目录.*更新上游目录/);
+  await atomicJson(join(f.dir, 'auth.json'), {});
+  await f.update(/缺少 URL 或凭据.*连接配置/);
+  assert.equal(f.state.requests.length, requests);
+  assert.equal(f.state.secretProviders.length, secrets);
+  assert(!f.state.prompts.slice(prompts).some(p => p.message.includes('API Key') || p.message.includes('服务 URL')));
+  assert.equal(f.runtime.getModel('service', modelId), live);
+  assert.deepEqual(JSON.parse(await readFile(join(f.dir, 'auth.json'), 'utf8')), {});
+  await assert.rejects(readFile(f.store.cachePath('service')), { code: 'ENOENT' });
+});
+
+test('upstream update cancellation and offline service tasks never auto-login or damage the live registry', async t => {
+  const f = await fixture(t); await f.add('service');
+  const files = [f.store.registryPath, join(f.dir, 'auth.json'), f.store.cachePath('service')];
+  const before = await Promise.all(files.map(p => readFile(p, 'utf8')));
+  const live = f.runtime.getModel('service', modelId);
+  f.state.onRequest = () => { f.state.loader.handleInput('\x1b'); return true; };
+  await f.update(/已取消 Gateway 操作/);
+  assert.equal(f.runtime.getModel('service', modelId), live);
+  assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
+  process.env.PI_OFFLINE = '1'; await f.load();
+  const requests = f.state.requests.length, prompts = f.state.secretProviders.length;
+  for (const task of ['连接配置', '更新上游目录', '协议诊断']) {
+    f.state.selects.push(task); await f.run('edit service', /离线模式.*本地.*刷新模型/);
+  }
+  await f.run('refresh service');
+  assert.equal(f.state.requests.length, requests);
+  assert.equal(f.state.secretProviders.length, prompts);
+  assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
+});
+
+test('Edit Service starts no work until a task is chosen; all failed diagnostics preserve saved state', async t => {
   const f = await fixture(t); await f.add('service');
   const files = [f.store.registryPath, f.store.cachePath('service'), join(f.dir, 'auth.json')];
   const before = await Promise.all(files.map(p => readFile(p, 'utf8')));
-  f.state.inputs.push(''); f.state.secrets.push('');
-  await f.run('edit service', /已取消/);
-  assert.equal(f.state.prompts.at(-1)!.choices![0], '取消');
+  const requests = f.state.requests.length;
+  await f.run('edit service');
+  assert.equal(f.state.prompts.at(-1)!.choices!.length, 3);
+  assert.equal(f.state.requests.length, requests);
   assert.deepEqual(await Promise.all(files.map(p => readFile(p, 'utf8'))), before);
   f.state.onRequest = method => { f.state.status = method === 'POST' ? 503 : 200; return false; };
   await f.probe(/本次探测未成功/);

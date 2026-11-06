@@ -50,7 +50,7 @@ async function validateDocument(data: Row, providers: readonly Provider[] = []):
 }
 export async function validateOverrides(value: unknown): Promise<Row> {
   const override = record(value);
-  if (!override || Object.keys(override).some(k => !(MODEL_FIELDS as readonly string[]).includes(k))) throw new Error('只允许模型参数；协议使用「协议」设置，URL 和凭据使用「编辑服务」');
+  if (!override || Object.keys(override).some(k => !(MODEL_FIELDS as readonly string[]).includes(k))) throw new Error('只允许模型参数；协议使用「协议偏好」设置，URL 和凭据使用「编辑服务 → 连接配置」');
   await validateDocument({ providers: { gatewayValidation: { modelOverrides: { model: override } } } });
   return override;
 }
