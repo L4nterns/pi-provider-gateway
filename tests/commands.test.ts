@@ -112,13 +112,31 @@ async function fixture(t: TestContext, seed?: (store: Store, root: string) => Pr
   return { state, dir, root, store, runtime, registered, ctx, load, run, add, command: () => command };
 }
 
+test('concise Gateway menu returns first and keeps risk warnings at the actual operation', async t => {
+  const f = await fixture(t);
+  await f.add('service');
+  const auth = await readFile(join(f.dir, 'auth.json'), 'utf8');
+  const requests = f.state.requests.length;
+  f.state.selects.push('返回'); await f.run('');
+  const menu = f.state.prompts.findLast(p => p.message === 'Gateway')!;
+  assert.equal(menu.choices![0], '返回');
+  assert(menu.choices!.every(c => c.length <= 20), 'main-menu descriptions stay short');
+  assert(!menu.choices!.join('').match(/不管理|不发出|上游|保留对话|稳定 ID/));
+  f.state.selects.push(undefined); await f.run('detect service');
+  assert.match(f.state.prompts.at(-1)!.message, /最多 4 次请求，可能计费/);
+  assert.equal(f.state.requests.length, requests, 'back or cancelled probe sends no request');
+  f.state.selects.push('取消'); await f.run('remove service');
+  assert.equal(f.state.prompts.at(-1)!.choices![0], '取消');
+  assert.equal(await readFile(join(f.dir, 'auth.json'), 'utf8'), auth);
+});
+
 test('empty registry has only Add, no implicit provider, no legacy login command', async t => {
   const f = await fixture(t);
   assert.deepEqual([...f.registered], []);
   assert.equal(f.runtime.getProvider('gateway'), undefined);
   await f.run('');
-  assert.equal(f.state.prompts[0].message, 'Gateway — 账号、路由、额度由上游管理');
-  assert.deepEqual(f.state.prompts[0].choices, ['添加服务  创建稳定 ID，填写 URL 和遮罩 Key']);
+  assert.equal(f.state.prompts[0].message, 'Gateway');
+  assert.deepEqual(f.state.prompts[0].choices, ['返回', '添加服务  ID、URL、Key']);
   f.state.prompts.length = 0;
   await f.run('edit', /尚未添加服务.*gateway add/);
   await f.run('login', /用法/);
@@ -135,7 +153,7 @@ test('first service uses the same Add wizard and registers only after successful
   f.state.selects.push('添加服务'); f.state.inputs.push('my-service', f.root); f.state.secrets.push(key);
   await f.run('');
   assert.deepEqual(f.state.secretProviders, [[]], 'neither a default nor a tentative service is published');
-  assert.match(f.state.prompts[1].message, /服务 ID.*必填.*不可修改/);
+  assert.match(f.state.prompts[1].message, /服务 ID.*必填.*固定/);
   assert.equal(f.state.prompts[2].message, '服务 URL');
   assert.deepEqual([...f.registered], ['my-service']);
   assert.deepEqual((await f.store.registry()).connections, [{ id: 'my-service', name: 'my-service', url: f.root }]);
@@ -231,7 +249,7 @@ test('streaming opens the menu immediately; mutations warn without queuing, read
   await f.add('service'); f.state.idle = false;
   f.state.prompts.length = 0;
   await f.run('');
-  assert.equal(f.state.prompts[0].message, 'Gateway — 账号、路由、额度由上游管理');
+  assert.equal(f.state.prompts[0].message, 'Gateway');
   const requests = f.state.requests.length;
   for (const action of ['add', 'edit service', 'refresh service', 'detect service', 'protocol service', 'remove service']) {
     await f.run(action);
@@ -265,7 +283,7 @@ test('protocol detection renders native progress for the catalog and each of fou
   for (const [index, api] of ['openai-responses', 'anthropic-messages', 'google-generative-ai', 'openai-completions'].entries()) {
     assert(rendered.includes(`（${index + 1}/4）：${api}`), rendered);
   }
-  assert.match(rendered, /正在保存探测结果/); assert.match(rendered, /Esc 取消操作/);
+  assert.match(rendered, /正在保存探测结果/); assert.match(rendered, /「Esc」取消/);
   assert.equal(f.state.requests.filter(m => m === 'POST').length, 4);
   assert.equal(f.state.loader, undefined);
   assert(!rendered.includes(key));

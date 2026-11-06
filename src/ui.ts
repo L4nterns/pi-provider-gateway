@@ -13,7 +13,7 @@ export async function progress<T>(ctx: ExtensionCommandContext, message: string,
     Promise.resolve().then(() => { signal.throwIfAborted(); return work(signal, report); })
       .then(value => done({ value }), error => done({ error }));
     return {
-      render: width => [...loader.render(width), truncateToWidth('Esc 取消操作', width)],
+      render: width => [...loader.render(width), truncateToWidth('「Esc」取消', width)],
       handleInput(data) {
         if (keys.matches(data, 'tui.select.cancel')) {
           controller.abort(new Error('已取消 Gateway 操作'));
@@ -40,7 +40,7 @@ export function secretInput(ctx: ExtensionCommandContext, message: string, signa
     if (signal?.aborted) queueMicrotask(cancel);
     return {
       focused: true,
-      render(width) { return [truncateToWidth(theme.fg('accent', message), width), truncateToWidth(`> ${'*'.repeat(Math.min(value.length, Math.max(0, width - 4)))}`, Math.max(0, width - 1)) + CURSOR_MARKER + ' ', truncateToWidth('Enter 确认 · Esc 取消（密钥不会写入会话）', width)]; },
+      render(width) { return [truncateToWidth(theme.fg('accent', message), width), truncateToWidth(`> ${'*'.repeat(Math.min(value.length, Math.max(0, width - 4)))}`, Math.max(0, width - 1)) + CURSOR_MARKER + ' ', truncateToWidth('「Enter」确认 · 「Esc」取消', width)]; },
       handleInput(data) {
         if (keys.matches(data, 'tui.select.cancel')) { cancel(); return; }
         if (keys.matches(data, 'tui.select.confirm')) { finish(value); return; }

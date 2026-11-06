@@ -105,7 +105,7 @@ export function createGateway(connection: Connection, store: Store, expectedConn
     for (;;) {
       const entered = await interaction.prompt({ type: 'text', message: current ? '服务 URL（留空保留当前地址）' : '服务 URL', placeholder: current ?? 'https://api.example.com' });
       try { root = normalizeUrl(entered.trim() || current || ''); break; }
-      catch { interaction.notify({ type: 'info', message: 'URL 格式无效：需为 http(s) 地址，不能含用户名、密码、查询参数或片段；请重新输入，Esc 取消。' }); }
+      catch { interaction.notify({ type: 'info', message: '「URL 无效」请用 http(s) 地址，去掉用户名、密码、查询参数和片段。' }); }
     }
     if (new URL(root).protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(root).hostname)) {
       const answer = await interaction.prompt({ type: 'select', message: '此地址使用明文 HTTP，密钥可能被窃听。是否继续？', options: [{ id: 'no', label: '取消' }, { id: 'yes', label: '继续' }] });
@@ -116,7 +116,7 @@ export function createGateway(connection: Connection, store: Store, expectedConn
     let s = await network('正在读取模型目录与协议声明…', signal => fresh(root, key, signal, false));
     const unknown = s.discovery.rows.filter(r => !s.discovery.protocols[String(r.id)]?.length && !connection.protocol && !connection.modelProtocols?.[String(r.id)]);
     if (unknown.length) {
-      const answer = await interaction.prompt({ type: 'select', message: `${unknown.length} 个模型未声明协议。探测最多发出 ${unknown.length * PROTOCOLS.length} 次小型请求，可能计费。`, options: [{ id: 'cancel', label: '取消' }, { id: 'probe', label: '探测协议', description: '仅探测本次目录中的未知模型，可能计费' }, ...PROTOCOLS.map(id => ({ id, label: id, description: '不探测，手动指定整个服务的协议' }))] });
+      const answer = await interaction.prompt({ type: 'select', message: `${unknown.length} 个模型协议未知 · 探测最多 ${unknown.length * PROTOCOLS.length} 次请求，可能计费`, options: [{ id: 'cancel', label: '取消' }, { id: 'probe', label: '探测协议', description: '验证这些模型' }, ...PROTOCOLS.map(id => ({ id, label: id, description: '整个服务手动使用' }))] });
       if (answer === 'cancel') throw new Error('已取消');
       if (answer === 'probe') {
         const rows = s.discovery.rows;

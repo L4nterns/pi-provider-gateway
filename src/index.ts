@@ -9,13 +9,13 @@ import { fingerprint, selectProtocol } from './discovery.ts';
 import { interaction, progress } from './ui.ts';
 
 const ACTIONS = [
-  { id: 'add', label: '添加服务', description: '创建稳定 ID，填写 URL 和遮罩 Key' },
-  { id: 'edit', label: '编辑连接', description: '修改 URL 或 Key，服务 ID 不变' },
-  { id: 'refresh', label: '刷新模型', description: '读取目录与能力，不发出生成探测' },
-  { id: 'detect', label: '探测协议', description: '验证单个模型，最多 4 次请求，可能计费' },
-  { id: 'info', label: '模型信息', description: '查看实际协议、参数、来源与覆盖' },
-  { id: 'protocol', label: '协议覆盖', description: '手动指定服务或模型协议，不发出探测' },
-  { id: 'remove', label: '删除服务', description: '删除连接、凭据和缓存，保留对话历史' },
+  { id: 'add', label: '添加服务', description: 'ID、URL、Key' },
+  { id: 'edit', label: '编辑连接', description: 'URL、Key' },
+  { id: 'refresh', label: '刷新模型', description: '更新目录与能力' },
+  { id: 'detect', label: '探测协议', description: '验证模型协议' },
+  { id: 'info', label: '模型信息', description: '协议、参数与来源' },
+  { id: 'protocol', label: '协议覆盖', description: '手动指定协议' },
+  { id: 'remove', label: '删除服务', description: '连接与凭据' },
 ] as const;
 const actionLabel = (a: typeof ACTIONS[number]) => `${a.label}  ${a.description}`;
 
@@ -87,7 +87,7 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
     let action = actionArg;
     if (!action) {
       const actions = connections.size ? ACTIONS : ACTIONS.filter(a => a.id === 'add');
-      const selected = await ctx.ui.select('Gateway — 账号、路由、额度由上游管理', actions.map(actionLabel));
+      const selected = await ctx.ui.select('Gateway', ['返回', ...actions.map(actionLabel)]);
       action = actions.find(a => actionLabel(a) === selected)?.id ?? '';
       if (!action) return;
     }
@@ -95,19 +95,19 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
       throw new Error('用法：/gateway add 或 /gateway [edit|refresh|detect|info|protocol|remove] [服务ID]');
     }
     if (action !== 'info' && !ctx.isIdle()) {
-      ctx.ui.notify('模型或工具仍在运行；此操作未执行、未排队。请等待结束后重试，当前请求不受影响。', 'warning');
+      ctx.ui.notify('「暂不可修改」模型或工具运行中；本次未执行、未排队。', 'warning');
       return;
     }
     if (action === 'add') {
       if (offline) throw new Error('离线模式不能添加服务');
       let id: string;
       for (;;) {
-        const entered = await ctx.ui.input('服务 ID（必填；1–64 位字母/数字/._-，首位字母或数字；创建后不可修改）', 'my-gateway', { signal: lifecycle.signal });
+        const entered = await ctx.ui.input('服务 ID（必填，创建后固定）', '1–64 位，字母/数字开头，可含 ._-', { signal: lifecycle.signal });
         if (entered === undefined) return;
         id = entered.trim();
-        if (!connectionId(id)) { ctx.ui.notify('服务 ID 格式无效；请按提示重新输入，Esc 取消。', 'warning'); continue; }
+        if (!connectionId(id)) { ctx.ui.notify('「服务 ID 无效」需 1–64 位，字母/数字开头，可含 ._-。', 'warning'); continue; }
         if (connections.has(id) || (getBuiltinProviders() as readonly string[]).includes(id) || (await store.registry()).connections.some(c => c.id === id)) {
-          ctx.ui.notify('服务 ID 已存在或由 Pi 内置服务使用；请换一个 ID，Esc 取消。', 'warning'); continue;
+          ctx.ui.notify('「服务 ID 已存在」请换一个 ID。', 'warning'); continue;
         }
         break;
       }
@@ -119,7 +119,7 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
         await register(saved);
         await ctx.modelRegistry.refresh({ providers: [id], allowNetwork: false });
       });
-      ctx.ui.notify(`${id} 已保存，可用 /model 选择模型`, 'info'); return;
+      ctx.ui.notify(`「${id}」已保存；使用「/model」选择模型。`, 'info'); return;
     }
     const c = await pick(ctx, specified); if (!c) return;
     if (action === 'info') return serviceCommand(action, c, ctx);
@@ -138,7 +138,7 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
         const credential = await (await authRuntime(c)).getAuth(c.id);
         if (!credential?.auth.apiKey) throw new Error('请先通过 /gateway edit 配置连接与凭据');
         const info = handle.info();
-        const model = await ctx.ui.select('选择要验证全部协议的模型（最多 4 次小型请求，可能计费）', info.models.map(m => m.id).concat(info.unknown));
+        const model = await ctx.ui.select('探测模型 · 最多 4 次请求，可能计费', info.models.map(m => m.id).concat(info.unknown));
         if (!model) return;
         const { discover, probeProtocol } = await import('./discovery.ts');
         const root = credential.env?.PI_GATEWAY_URL ?? c.url; if (!root) throw new Error('没有服务地址');
@@ -170,35 +170,35 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
       const runtime = await authRuntime(c, c, ctx); await runtime.login(c.id, 'api_key', interaction(ctx, lifecycle.signal));
       await register((await store.registry()).connections.find(x => x.id === c.id)!);
       await ctx.modelRegistry.refresh({ providers: [c.id], allowNetwork: false });
-      ctx.ui.notify('已保存连接与凭据，可用 /model 选择模型', 'info'); return;
+      ctx.ui.notify('「连接已保存」使用「/model」选择模型。', 'info'); return;
     }
     if (action === 'refresh') { await refresh(ctx, c); return; }
     if (action === 'info') {
       const models = ctx.modelRegistry.getAll().filter(m => m.provider === c.id) as GatewayModel[];
-      const id = await ctx.ui.select('模型信息（包含 Pi 原生覆盖后的实际参数）', models.map(m => m.id));
+      const id = await ctx.ui.select('模型信息', models.map(m => m.id));
       const m = models.find(m => m.id === id); if (!m) return;
-      await ctx.ui.editor('仅查看；关闭即可，不修改配置', JSON.stringify({ id: m.id, api: m.api, contextWindow: m.contextWindow, maxTokens: m.maxTokens, input: m.input, reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap, compat: m.compat, sources: m.gateway?.source, protocolEvidence: m.gateway?.protocolEvidence, protocolSelection: protocolState(ctx, c, m.id), warnings: m.gateway?.warnings, note: 'models.json 用户覆盖最终优先；来源描述的是自动发现层' }, null, 2)); return;
+      await ctx.ui.editor('模型详情 · 只读', JSON.stringify({ id: m.id, api: m.api, contextWindow: m.contextWindow, maxTokens: m.maxTokens, input: m.input, reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap, compat: m.compat, sources: m.gateway?.source, protocolEvidence: m.gateway?.protocolEvidence, protocolSelection: protocolState(ctx, c, m.id), warnings: m.gateway?.warnings, note: 'models.json 用户覆盖最终优先；来源描述的是自动发现层' }, null, 2)); return;
     }
     if (action === 'protocol') {
       const target = await ctx.ui.select('覆盖范围', ['整个服务', ...handles.get(c.id)!.info().models.map(m => m.id), ...handles.get(c.id)!.info().unknown]);
       if (!target) return;
-      const api = await ctx.ui.select('协议（自动将删除手动覆盖）', ['自动', ...PROTOCOLS]); if (!api) return;
+      const api = await ctx.ui.select('协议 ·「自动」清除手动覆盖', ['自动', ...PROTOCOLS]); if (!api) return;
       const updated = structuredClone(c);
       if (target === '整个服务') { if (api === '自动') delete updated.protocol; else updated.protocol = api as Protocol; }
       else { updated.modelProtocols ??= {}; if (api === '自动') delete updated.modelProtocols[target]; else updated.modelProtocols[target] = api as Protocol; }
       await store.put(updated, c); await register(updated); await ctx.modelRegistry.refresh({ providers: [c.id], allowNetwork: false });
-      ctx.ui.notify(`${c.id}：已保存${target === '整个服务' ? '服务' : '模型'}协议覆盖；实际使用含 Pi 原生覆盖，请在「模型信息」查看。`, 'info'); return;
+      ctx.ui.notify('「协议已保存」实际使用见「模型信息」。', 'info'); return;
     }
     if (action === 'remove') {
       if (ctx.model?.provider === c.id) throw new Error('请先通过 /model 切换到其他服务，再删除当前服务');
-      const deletion = `删除  ${c.id} 的连接、凭据与扩展缓存；保留会话和 models.json`;
-      if (await ctx.ui.select('删除服务 — 不可撤销', ['取消', deletion], { signal: lifecycle.signal }) !== deletion) return;
+      const deletion = '删除  连接、凭据与缓存；保留对话和模型覆盖';
+      if (await ctx.ui.select(`删除「${c.id}」？`, ['取消', deletion], { signal: lifecycle.signal }) !== deletion) return;
       const runtime = await authRuntime(c); await runtime.logout(c.id);
       await store.remove(c); handles.get(c.id)?.dispose(); handles.delete(c.id); connections.delete(c.id); pi.unregisterProvider(c.id); return;
     }
   }
   pi.registerCommand('gateway', {
-    description: '终端内管理兼容网关：连接、协议、模型与能力；不管理上游账号/路由',
+    description: '管理网关连接与模型',
     getArgumentCompletions(prefix) {
       return ACTIONS.filter(a => a.id.startsWith(prefix)).map(a => ({ value: a.id, label: a.id }));
     },
