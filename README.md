@@ -10,7 +10,7 @@
 pi install git:github.com/L4nterns/pi-provider-gateway
 ```
 
-默认安装仓库最新分支（当前为 `main`），不固定版本、tag 或提交。独立使用时通过原生 `pi update git:github.com/L4nterns/pi-provider-gateway` 获取后续提交；原生持久化安装不是后台定时自更新器。在 pic 中，通用启动器会在没有其他托管 Pi 使用共享插件时、启动新进程前自动更新；接回原进程不更新，正在运行时不热替换。
+上述来源不带版本、tag 或提交 SHA，首次安装获取仓库默认分支的当前内容。后续更新使用原生 `pi update git:github.com/L4nterns/pi-provider-gateway`；不固定来源不代表每次启动自动更新，插件本身也不实现自更新。
 
 开发时也可本地安装：
 
@@ -90,6 +90,6 @@ npm test
 
 ## 与 pic 解耦
 
-本仓库是独立 Pi 包，不导入或依赖 [pic](https://github.com/L4nterns/pic)。pic 不保存本插件源码或在镜像中复制插件目录，只通过通用启动器调用原生 `pi install` / `pi update`，从这个公开仓库获取默认分支最新提交，不固定插件版本。插件也可以在宿主机或任何其他 Pi 环境独立使用；服务配置、认证和协议策略不属于 pic。
+本仓库是独立 Pi 包，不导入或依赖 [pic](https://github.com/L4nterns/pic)。pic 不保存本插件源码或在镜像中复制插件目录，只通过通用引导器调用原生 `pi install`，首次从这个公开仓库的未固定来源在线安装一次；不增加启动前自动更新策略，后续安装与更新由 Pi 原生包管理负责。插件也可以在宿主机或任何其他 Pi 环境独立使用；服务配置、认证和协议策略不属于 pic。
 
 已有本地安装不会被本仓库或 pic 自动迁移。切换安装来源前先备份 Pi 数据，通过原生包管理检查并处理旧声明，避免同时加载本地副本与 Git 副本；不要删除或覆盖 `auth.json`、模型例外或历史。
