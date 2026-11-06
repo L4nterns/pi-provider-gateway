@@ -1,0 +1,32 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm,readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {createServer} from 'node:http';
+import {ModelRuntime} from '@earendil-works/pi-coding-agent';
+import {InMemoryModelsStore} from '@earendil-works/pi-ai';
+import gatewayExtension from '../src/index.ts';
+import {atomicJson,Store} from '../src/storage.ts';
+
+test('terminal command workflow: add/login/info/protocol/refresh/remove; no key in notifications',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'gateway-command-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const previous=process.env.PI_CODING_AGENT_DIR;process.env.PI_CODING_AGENT_DIR=dir;t.after(()=>{if(previous===undefined)delete process.env.PI_CODING_AGENT_DIR;else process.env.PI_CODING_AGENT_DIR=previous;});
+  await atomicJson(join(dir,'cache/gateway/models-dev.json'),{checkedAt:Date.now(),data:{}});
+  const server=createServer((_req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[{id:'gpt-6.1-sol',native_endpoints:['/v1/responses','/v1/chat/completions']}]}));});
+  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise<void>(r=>{server.closeAllConnections();server.close(()=>r());}));
+  const root=`http://127.0.0.1:${(server.address() as any).port}`;
+  const runtime=await ModelRuntime.create({authPath:join(dir,'auth.json'),modelsPath:null,modelsStore:new InMemoryModelsStore(),refreshOnCreate:false,allowModelNetwork:false});
+  let command:any;let shutdown:any;const notices:string[]=[];let inputs=['second',root],selects:string[]=[];
+  const pi:any={registerProvider:(p:any)=>runtime.registerNativeProvider(p),unregisterProvider:(id:string)=>runtime.unregisterProvider(id),registerCommand:(_id:string,c:any)=>{command=c;},on:(_event:string,handler:any)=>{shutdown=handler;}};
+  const ctx:any={mode:'tui',waitForIdle:async()=>{},modelRegistry:{refresh:(o:any)=>runtime.refresh(o),getAll:()=>runtime.getModels()},ui:{input:async()=>inputs.shift(),select:async(_m:string,values:string[])=>selects.shift()??values[0],confirm:async()=>true,editor:async(_m:string,text:string)=>{assert(text.includes('272000'));notices.push(text);},notify:(m:string,kind:string)=>{notices.push(m);assert.notEqual(kind,'error',m);},custom:async()=> 'FAKE-COMMAND-KEY'}};
+  await gatewayExtension(pi);t.after(()=>shutdown());
+  await assert.rejects(runtime.getProvider('gateway')!.auth.apiKey!.login!({prompt:async()=>{throw new Error('must not prompt');},notify:()=>{}} as any),/遮罩/);
+  await command.handler('add',ctx);assert(runtime.getModel('second','gpt-6.1-sol'));assert.equal((await new Store(dir).registry()).connections.length,1);
+  selects=['gpt-6.1-sol'];await command.handler('info second',ctx);
+  selects=['整个服务','openai-completions'];await command.handler('protocol second',ctx);assert.equal(runtime.getModel('second','gpt-6.1-sol')?.api,'openai-completions');
+  await command.handler('refresh second',ctx);assert(runtime.getModel('second','gpt-6.1-sol'));
+  inputs=[root];await command.handler('login second',ctx);assert.equal(runtime.getModel('second','gpt-6.1-sol')?.api,'openai-completions');
+  await command.handler('remove second',ctx);assert.equal((await new Store(dir).registry()).connections.length,0);assert(!JSON.parse(await readFile(join(dir,'auth.json'),'utf8')).second);
+  assert(!notices.join('').includes('FAKE-COMMAND-KEY'));
+});
