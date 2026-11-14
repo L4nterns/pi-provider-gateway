@@ -43,7 +43,8 @@ test('Magpie and NewAPI protocol declarations; preference only among supported p
 });
 test('real metadata mapping preserves image/max and never inherits official wire compat', () => {
   const [m] = buildModels(connection, 'https://example.test', d);
-  assert.equal(m.contextWindow, 272000); assert.equal(m.maxTokens, 128000); assert.deepEqual(m.input, ['text','image']);
+  assert.equal(m.contextWindow, 272000); assert.equal(m.maxTokens, 65536); assert.deepEqual(m.input, ['text','image']);
+  assert.deepEqual(m.gateway.limits, { maxTokens: { raw: 128000, effective: 65536, cap: 65536 } });
   assert.equal(m.thinkingLevelMap?.max, 'max'); assert.equal(m.thinkingLevelMap?.minimal, null);
   assert(getSupportedThinkingLevels(m).includes('max'));
   assert.deepEqual(m.compat, { supportsExplicitPromptCacheMode: false });

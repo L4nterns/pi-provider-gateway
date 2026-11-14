@@ -1,7 +1,7 @@
 import type { Model, Api } from '@earendil-works/pi-ai';
 import { getBuiltinModels, getBuiltinProviders } from '@earendil-works/pi-ai/providers/all';
 import { baseFor, selectProtocol } from './discovery.ts';
-import { LEVELS, clean, own, positive, record, strings, type Connection, type Discovery, type EffortMap, type GatewayModel, type Protocol, type Row } from './types.ts';
+import { LEVELS, clean, effectiveLimits, own, positive, record, strings, type AppliedCap, type Connection, type Discovery, type EffortMap, type GatewayModel, type GatewayPolicy, type Protocol, type Row } from './types.ts';
 
 export interface Metadata {
   name?: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean;
@@ -71,9 +71,11 @@ export function builtinMetadata(id: string, catalog: Row = {}): Metadata | undef
   return undefined;
 }
 export function effortMap(values: unknown, toggle = false): EffortMap | undefined {
-  if (!Array.isArray(values) || values.length === 0) return undefined;
-  const efforts = values.flatMap(x => typeof x === 'string' ? [x] : typeof record(x)?.effort === 'string' ? [String(record(x)!.effort)] : []);
-  if (!efforts.length) return undefined;
+  const list = Array.isArray(values) ? values : [];
+  const efforts = list.flatMap(x => typeof x === 'string' ? [x] : typeof record(x)?.effort === 'string' ? [String(record(x)!.effort)] : []);
+  // A toggle with no named effort levels is still useful: expose off, leave the
+  // provider default in charge when thinking is on.
+  if (!efforts.length) return toggle ? { off: 'none' } : undefined;
   const result: EffortMap = {};
   for (const level of LEVELS) {
     if (level === 'off') {
@@ -95,7 +97,13 @@ export function fromRow(row: Row, source = 'endpoint'): Metadata {
   const modalities = record(row.modalities) ?? {}; const architecture = record(row.architecture) ?? {};
   const kinds = strings(row.input ?? row.input_modalities ?? modalities.input ?? architecture.input_modalities);
   const vision = bool(row.image_input, row.supports_vision, cap.vision);
-  const thinkingLevelMap = effortMap(row.supported_reasoning_levels ?? row.reasoning_levels ?? row.thinking_levels ?? cap.supported_reasoning_levels);
+  const options = Array.isArray(row.reasoning_options) ? row.reasoning_options : Array.isArray(cap.reasoning_options) ? cap.reasoning_options : [];
+  const toggle = options.some(o => record(o)?.type === 'toggle');
+  const optionEfforts = record(options.find(o => record(o)?.type === 'effort'))?.values;
+  const thinkingLevelMap = effortMap(
+    row.supported_reasoning_levels ?? row.reasoning_levels ?? row.thinking_levels ?? cap.supported_reasoning_levels ?? optionEfforts,
+    toggle,
+  );
   const reasoning = bool(row.reasoning, row.supports_reasoning, cap.reasoning, row.thinking) ?? (thinkingLevelMap ? true : undefined);
   return {
     source,
@@ -111,9 +119,6 @@ function catalogMetadata(row: Row, provider: string): Metadata {
   const meta = fromRow(row, `models.dev:${provider}`);
   const modalities = record(row.modalities);
   if (Array.isArray(modalities?.input)) meta.input = ['text', ...(strings(modalities.input).includes('image') ? ['image' as const] : [])];
-  const opts = Array.isArray(row.reasoning_options) ? row.reasoning_options : [];
-  const toggle = opts.some(o => record(o)?.type === 'toggle');
-  if (opts.length) meta.thinkingLevelMap = effortMap(record(opts.find(o => record(o)?.type === 'effort'))?.values, toggle);
   const cost = record(row.cost);
   if (cost) {
     const rate = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0;
@@ -133,8 +138,13 @@ export function publicMetadata(id: string, catalog: Row): Metadata | undefined {
   }
   return entries.length === 1 ? entries[0] : undefined;
 }
-export function buildModels(connection: Connection, root: string, discovery: Discovery, catalog: Row = {}): GatewayModel[] {
+function applyCap(raw: number, cap: number | null): { value: number; applied?: AppliedCap } {
+  if (cap === null || !Number.isFinite(cap) || cap <= 0 || raw <= cap) return { value: raw };
+  return { value: cap, applied: { raw, effective: cap, cap } };
+}
+export function buildModels(connection: Connection, root: string, discovery: Discovery, catalog: Row = {}, policy: GatewayPolicy = {}): GatewayModel[] {
   const result: GatewayModel[] = [];
+  const limits = effectiveLimits(connection, policy);
   for (const row of discovery.rows) {
     const id = String(row.id);
     const protocols = own(discovery.protocols, id) ?? [];
@@ -151,12 +161,18 @@ export function buildModels(connection: Connection, root: string, discovery: Dis
     };
     const reasoning = take('reasoning', false);
     const map = reasoning ? take('thinkingLevelMap', {}) : undefined;
-    const contextWindow = take('contextWindow', 128000);
-    const maxTokens = Math.min(take('maxTokens', 16384), contextWindow);
+    const rawContextWindow = take('contextWindow', 128000);
+    const contextCap = applyCap(rawContextWindow, limits.contextWindowCap);
+    const contextWindow = contextCap.value;
+    const rawMaxTokens = Math.min(take('maxTokens', 16384), contextWindow);
+    const maxTokensCap = applyCap(rawMaxTokens, limits.maxTokensCap);
+    const maxTokens = maxTokensCap.value;
     const apiEvidence = override ? 'user' : own(discovery.evidence, id) ?? 'unknown';
     const warnings: string[] = [];
     const cost = take('cost', zeroCost());
     const name = take('name', id), input = take('input', ['text']);
+    if (contextCap.applied) warnings.push(`上下文窗口从 ${rawContextWindow.toLocaleString('en-US')} 限制为 ${contextWindow.toLocaleString('en-US')}（gateway policy；避免阶梯计费与上下文漂移）`);
+    if (maxTokensCap.applied) warnings.push(`最大输出从 ${rawMaxTokens.toLocaleString('en-US')} 限制为 ${maxTokens.toLocaleString('en-US')}（gateway policy）`);
     if (sources.cost === 'unverified-default') warnings.push('价格未知；Pi 的 0 占位不代表免费');
     else if (sources.cost !== 'endpoint') warnings.push('价格为公共目录参考值，并非网关账单');
     if (Object.entries(sources).some(([k, v]) => k !== 'cost' && v === 'unverified-default')) warnings.push('部分能力没有可靠元数据，使用未验证默认值');
@@ -164,7 +180,15 @@ export function buildModels(connection: Connection, root: string, discovery: Dis
       id, name, provider: connection.id, api, baseUrl: baseFor(root, api),
       contextWindow, maxTokens, reasoning, input, cost,
       ...(map ? { thinkingLevelMap: map } : {}),
-      gateway: { source: sources, protocols, protocolEvidence: apiEvidence, warnings },
+      gateway: {
+        source: sources, protocols, protocolEvidence: apiEvidence, warnings,
+        ...(contextCap.applied || maxTokensCap.applied ? {
+          limits: {
+            ...(contextCap.applied ? { contextWindow: contextCap.applied } : {}),
+            ...(maxTokensCap.applied ? { maxTokens: maxTokensCap.applied } : {}),
+          },
+        } : {}),
+      },
     };
     // Deliberately no official compat inheritance. Only verified endpoint policies below.
     if (api === 'openai-responses') model.compat = { supportsExplicitPromptCacheMode: false };

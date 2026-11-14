@@ -9,6 +9,7 @@ import { interaction, progress, readOnly } from './ui.ts';
 import { automaticParameters, editableOverride, modelFile, nativeOverride, saveOverrides, validateModelPath } from './model-config.ts';
 import { editParameters } from './model-editor.ts';
 import { modelDetails } from './model-info.ts';
+import { normalizeAssistantError } from './errors.ts';
 
 const ACTIONS = [
   { id: 'add', label: '添加服务', description: '创建服务，填写服务 ID、URL 和 Key' },
@@ -49,6 +50,15 @@ export default async function gatewayExtension(pi: ExtensionAPI) {
   for (const c of registry.connections) if (builtinIds.has(c.id)) throw new Error(`服务 ID「${c.id}」与 Pi 内置 provider 冲突；请编辑 gateway.json 后重新加载`);
   for (const c of registry.connections) await register(c);
   pi.on('session_shutdown', () => { lifecycle.abort(); for (const h of handles.values()) h.dispose(); });
+  // A relay may drop the HTTP stream and report only "Unknown error". Treat
+  // that opaque transport failure as retryable for this gateway's providers;
+  // deterministic errors are left untouched. At >=90% context an opaque
+  // failure is more likely an overflow, so let Pi compact instead of retrying.
+  pi.on('message_end', (event, ctx) => {
+    if (event?.message?.role !== 'assistant' || !connections.has(event.message.provider)) return;
+    const normalized = normalizeAssistantError(event.message, ctx.getContextUsage?.()?.percent);
+    if (normalized) return { message: normalized };
+  });
 
   const pick = async (ctx: ExtensionCommandContext, specified?: string): Promise<Connection | undefined> => {
     if (specified) { const c = connections.get(specified); if (!c) throw new Error('找不到该服务'); return c; }

@@ -75,7 +75,8 @@ export function createGateway(connection: Connection, store: Store, expectedConn
   async function mapped(root: string, s: Snapshot, signal: AbortSignal, network: boolean): Promise<GatewayModel[]> {
     const needsPublic = s.discovery.rows.some(r => !builtinMetadata(String(r.id)));
     const catalog = needsPublic ? await loadPublicCatalog(store, signal, network) : {};
-    return buildModels(connection, root, cachedDiscovery(s), catalog).map(m => ({ ...m, gateway: { ...m.gateway, binding: s.fingerprint } }));
+    const policy = (await store.registry()).policy;
+    return buildModels(connection, root, cachedDiscovery(s), catalog, policy).map(m => ({ ...m, gateway: { ...m.gateway, binding: s.fingerprint } }));
   }
   async function restore(credential: ApiKeyCredential | undefined, signal: AbortSignal): Promise<string | undefined> {
     const root = credentialRoot(connection, credential);

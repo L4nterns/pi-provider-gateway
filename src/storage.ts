@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { normalizeUrl } from './discovery.ts';
-import { PROTOCOLS, own, record, type Connection, type Registry, type Row, type Snapshot } from './types.ts';
+import { PROTOCOLS, own, record, type Connection, type GatewayPolicy, type Limits, type Registry, type Row, type Snapshot } from './types.ts';
 
 export async function readJson(path: string): Promise<unknown | undefined> {
   try { return JSON.parse(await readFile(path, 'utf8')); }
@@ -39,10 +39,29 @@ export async function locked<T>(path: string, fn: () => Promise<T>): Promise<T> 
   try { return await fn(); } finally { await rm(lock, { force: true }); }
 }
 export const connectionId = (x: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(x) && !['__proto__', 'constructor', 'prototype'].includes(x);
+const LIMIT_KEYS = ['contextWindowCap', 'maxTokensCap'] as const;
+function parseLimitValue(value: unknown, field: string): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0 || value > 10_000_000) throw new Error(`无效的 ${field}`);
+  return value;
+}
+function parseLimits(value: unknown, where: string): Limits | undefined {
+  if (value === undefined) return undefined;
+  const input = record(value);
+  if (!input || Object.keys(input).some(key => !(LIMIT_KEYS as readonly string[]).includes(key))) throw new Error(`${where} 格式不正确（未覆盖）`);
+  const limits: Limits = {};
+  for (const key of LIMIT_KEYS) {
+    const parsed = parseLimitValue(input[key], `${where}.${key}`);
+    if (parsed !== undefined) limits[key] = parsed;
+  }
+  return Object.keys(limits).length ? limits : undefined;
+}
 export function parseRegistry(value: unknown): Registry {
   if (value === undefined) return { version: 1, connections: [] };
   const root = record(value);
   if (root?.version !== 1 || !Array.isArray(root.connections)) throw new Error('gateway.json 格式不正确（未覆盖）');
+  const policy = parseLimits(root.policy, 'gateway policy');
   const connections: Connection[] = []; const ids = new Set<string>();
   for (const v of root.connections) {
     const c = record(v);
@@ -51,9 +70,10 @@ export function parseRegistry(value: unknown): Registry {
     if (c.protocol !== undefined && !PROTOCOLS.includes(c.protocol as never)) throw new Error('无效协议');
     const modelProtocols = record(c.modelProtocols);
     if (c.modelProtocols !== undefined && (!modelProtocols || Object.values(modelProtocols).some(p => !PROTOCOLS.includes(p as never)))) throw new Error('无效的模型协议覆盖');
-    connections.push({ id: c.id, name: c.name, ...(typeof c.url === 'string' ? { url: normalizeUrl(c.url) } : {}), ...(c.protocol ? { protocol: c.protocol as Connection['protocol'] } : {}), ...(modelProtocols ? { modelProtocols: modelProtocols as Connection['modelProtocols'] } : {}) });
+    const limits = parseLimits(c.limits, `服务 ${c.id} 的 limits`);
+    connections.push({ id: c.id, name: c.name, ...(typeof c.url === 'string' ? { url: normalizeUrl(c.url) } : {}), ...(c.protocol ? { protocol: c.protocol as Connection['protocol'] } : {}), ...(modelProtocols ? { modelProtocols: modelProtocols as Connection['modelProtocols'] } : {}), ...(limits ? { limits } : {}) });
   }
-  return { version: 1, connections };
+  return { version: 1, ...(policy ? { policy } : {}), connections };
 }
 export class Store {
   readonly dir: string;
@@ -92,8 +112,8 @@ export class Store {
   }
   async save(id: string, value: Snapshot): Promise<void> { await locked(this.cachePath(id), () => atomicJson(this.cachePath(id), value)); }
 }
-const FIELDS = new Set(['id','name','display_name','contextWindow','context_window','context_length','max_input_tokens','maxTokens','max_tokens','max_output_tokens','max_completion_tokens','inputTokenLimit','outputTokenLimit','input','input_modalities','output_modalities','reasoning','supports_reasoning','thinking','image_input','supports_vision','supported_reasoning_levels','reasoning_levels','thinking_levels','native_endpoints','supported_endpoint_types','supportedGenerationMethods','api','endpoints']);
-const NESTED: Record<string, string[]> = { limit: ['context','input','output'], limits: ['context','context_window','max_output_tokens'], modalities: ['input','output'], architecture: ['input_modalities','output_modalities'], capabilities: ['reasoning','vision','supported_reasoning_levels'] };
+const FIELDS = new Set(['id','name','display_name','contextWindow','context_window','context_length','max_input_tokens','maxTokens','max_tokens','max_output_tokens','max_completion_tokens','inputTokenLimit','outputTokenLimit','input','input_modalities','output_modalities','reasoning','supports_reasoning','thinking','image_input','supports_vision','supported_reasoning_levels','reasoning_levels','thinking_levels','reasoning_options','native_endpoints','supported_endpoint_types','supportedGenerationMethods','api','endpoints']);
+const NESTED: Record<string, string[]> = { limit: ['context','input','output'], limits: ['context','context_window','max_output_tokens'], modalities: ['input','output'], architecture: ['input_modalities','output_modalities'], capabilities: ['reasoning','vision','supported_reasoning_levels','reasoning_options'] };
 export function metadataOnly(row: Row): Row {
   const out: Row = {};
   for (const [k, v] of Object.entries(row)) {

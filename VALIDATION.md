@@ -16,9 +16,9 @@ npm test
 ```
 
 - TypeScript 检查通过。
-- 91 项测试通过，0 失败、0 跳过；统计包含参数化子测试。
-- 网关 ID 与原厂目录显示名逐字一致时才取用参考能力：`deepseek-v4.1-flash-1017` 取得 1048576 上下文、393216 输出、image 与 low/high/max（off 仍可选，`max_tokens` 不再落回 128K／16K），原厂未命名的 `deepseek-v4.1-flash-1102` 保持未验证默认值。真实 Pi 载荷检查所选模型的 `max_tokens`、`reasoning_effort` low/max，以及 off 只发送 `thinking: { type: "disabled" }`。公共目录声明 on/off 切换时 `off` 不落为 null；层级未知时按 Pi 默认档位集合处理。
-- 自定义服务 ID／URL 下的 DeepSeek 回归直接检查 Pi 原生序列化载荷：system 角色、thinking、low/max、工具结果后的 reasoning_content、无 store，以及原生 compat 覆盖优先。覆盖 canonical 与版本模型 ID，未传请求级 maxTokens 时检查默认 max_tokens 不超过原厂上限；供应商／模型索引不混用，转售商记录不会伪装原厂。保留 1M 上下文、384K 输出、image 与 max；载荷生成后即中止，不发送真实网络请求。缺少 probes 数组的缓存快照会被拒绝，诊断在发出请求前要求重新同步；持久化服务 ID 与 Pi 内置 provider 冲突时拒绝加载。
+- 98 项测试通过，0 失败、0 跳过；统计包含参数化子测试。
+- 网关 ID 与原厂目录显示名逐字一致时才取用参考能力：`deepseek-v4.1-flash-1017` 的参考元数据为 1048576 上下文、393216 输出、image 与 low/high/max（off 仍可选）；默认 gateway policy 生效后为 272K／65,536，原厂未命名的 `deepseek-v4.1-flash-1102` 保持未验证默认值。真实 Pi 载荷检查所选模型的 `max_tokens`、`reasoning_effort` low/max，以及 off 只发送 `thinking: { type: "disabled" }`。公共目录声明 on/off 切换时 `off` 不落为 null；层级未知时按 Pi 默认档位集合处理。
+- 自定义服务 ID／URL 下的 DeepSeek 回归直接检查 Pi 原生序列化载荷：system 角色、thinking、low/max、工具结果后的 reasoning_content、无 store，以及原生 compat 覆盖优先。覆盖 canonical 与版本模型 ID，未传请求级 maxTokens 时检查默认 max_tokens 不超过原厂上限；供应商／模型索引不混用，转售商记录不会伪装原厂。原厂参考仍保留 1M 上下文、384K 输出、image 与 max；默认 gateway policy 再压到 272K／65,536，测试同时验证 `policy`、服务级 `limits` 与 `null` 关闭；载荷生成后即中止，不发送真实网络请求。缺少 probes 数组的缓存快照会被拒绝，诊断在发出请求前要求重新同步；持久化服务 ID 与 Pi 内置 provider 冲突时拒绝加载。
 - 慢连接验证期间外部轮换凭据会拒绝提交，保留新凭据及原 registry/cache 字节。原型同名的目录字段与模型 ID 不会成为继承的策略；SSE CRLF 即使逐字节分块也能识别协议成功事件。
 - 菜单只含六个操作、没有返回项；另在无开发 node_modules 的分发目录运行真实 Pi CLI／PTY，验证 Esc 返回、信息页确实只读（Enter／Ctrl+G 不提交或启动编辑器），并通过常用字段和原生高级编辑器保存上下文／缓存兼容参数，立即在信息页读到新生效值。连接、凭据、缓存保持不变；只允许预期的原生模型覆盖文件变化。场景离线运行，没有真实网关或付费调用。
 - 「管理服务」分为连接配置、同步目录、协议诊断。连接配置保留服务／模型协议控制但不发出生成请求；更新复用已有凭据，未知模型保留、合法空目录清空。诊断选择单个／全部模型，不经过 URL／Key，不重新 GET，默认取消、展示请求上限与不可撤销费用。只改对应模型的诊断记录，保留未选模型支持证据、原生覆盖和目录抓取时间；保存前重新检查服务／凭据，陈旧结果不覆盖。
@@ -38,14 +38,14 @@ npm test
 ## 安装与 CI 核验
 
 - 实现提交 [`fca5e9e`](https://github.com/L4nterns/pi-provider-gateway/commit/fca5e9e1ad197e3dca8459e708b779f032b161d6) 的 [GitHub Actions](https://github.com/L4nterns/pi-provider-gateway/actions/runs/42407097762) 已完成，`checks` 成功。
-- 实际 Git 安装副本与该实现提交一致，工作树干净。Pi 1.5.0 环境中离线读取现有服务与缓存，确认 `gpt-6.1-sol` 仍为 Responses、272000 上下文、128000 最大输出、text/image、reasoning 与 max；`supportsExplicitPromptCacheMode: false` 生效。网络入口被禁止，实际请求数为 0；配置、凭据与缓存字节不变，没有创建或恢复 `models.json`。
+- 实际 Git 安装副本与该实现提交一致，工作树干净。Pi 1.5.0 环境中离线读取现有服务与缓存，确认 `gpt-6.1-sol` 仍为 Responses、272000 上下文、65536 最大输出、text/image、reasoning 与 max；`supportsExplicitPromptCacheMode: false` 生效。网络入口被禁止，实际请求数为 0；配置、凭据与缓存字节不变，没有创建或恢复 `models.json`。
 - 上述离线核验不发送生成、工具、图片或压缩请求，不能替代更新后的真实模型验收，也不能证明未提供备份的历史手工覆盖完整。以下真实网关结果保持其明确的执行范围，不作为本次更新后的付费复验。
 
 ## 先前完成的真实网关验证
 
 以下是开发阶段已实际执行的记录，并非本轮发布时重新发出的付费请求。已有凭据只读入内存，测试状态使用临时目录或内存，不打印密钥：
 
-- 测试网关目录包含 9 个模型；`gpt-6.1-sol` 的 Responses、272000 上下文、128000 输出、text/image 与 low/medium/high/xhigh/max 正常注册。
+- 测试网关目录包含 9 个模型；`gpt-6.1-sol` 的 Responses、272000 上下文、65536 输出、text/image 与 low/medium/high/xhigh/max 正常注册；opaque `Unknown error`／空错误在 gateway `message_end` 被规范为可重试语义，≥90% 上下文时规范为 `context_length_exceeded`，确定性错误保持原文。
 - Responses、Chat Completions、Anthropic Messages 的真实协议探测成功；Gemini 返回 HTTP 503，仍标为**未确认**，不是不支持。
 - max 普通生成、工具调用 → 工具结果 → 最终回复、离线缓存恢复通过。
 - 128×128 纯绿 PNG 被回答为 Green；较早的 32px 红色样本被答作 Orange。只证明这些样本的实际行为，不代表全面视觉准确率；没有为通过测试修改传输或关闭图片。

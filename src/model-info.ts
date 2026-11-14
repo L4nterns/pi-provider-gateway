@@ -30,6 +30,14 @@ export function modelDetails(model: Model<Api>, base: GatewayModel | undefined, 
     field('输入', 'input', model.input.join('、')),
     field('推理', 'reasoning', model.reasoning ? '支持' : '不支持'),
   ];
+  if (base?.gateway.limits?.contextWindow) {
+    const cap = base.gateway.limits.contextWindow;
+    lines.push(`  上下文上限：${cap.raw.toLocaleString('en-US')} → ${cap.effective.toLocaleString('en-US')}（cap ${cap.cap.toLocaleString('en-US')}）  [gateway policy]`);
+  }
+  if (base?.gateway.limits?.maxTokens) {
+    const cap = base.gateway.limits.maxTokens;
+    lines.push(`  输出上限：${cap.raw.toLocaleString('en-US')} → ${cap.effective.toLocaleString('en-US')}（cap ${cap.cap.toLocaleString('en-US')}）  [gateway policy]`);
+  }
   for (const key of ['thinkingLevelMap', 'inputLimits', 'promptCache', 'samplingParams', 'samplingParamsByThinkingLevel', 'compat'] as const) {
     if (model[key] !== undefined) lines.push(field(key, key, model[key]));
   }

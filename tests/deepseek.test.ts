@@ -26,7 +26,8 @@ test('custom DeepSeek prefers declared Chat and supplies only its supported wire
   const [unproven] = buildModels({ ...connection, protocol: 'openai-completions' }, root, { ...discovery, protocols: {}, evidence: {} });
   assert.deepEqual(unproven.gateway.protocols, [], 'explicit selection cannot manufacture support evidence');
   const [m] = buildModels(connection, root, discovery);
-  assert.equal(m.reasoning, true); assert.equal(m.contextWindow, 1000000); assert.equal(m.maxTokens, 384000);
+  assert.equal(m.reasoning, true); assert.equal(m.contextWindow, 272000); assert.equal(m.maxTokens, 65536);
+  assert.deepEqual(m.gateway.limits, { contextWindow: { raw: 1000000, effective: 272000, cap: 272000 }, maxTokens: { raw: 272000, effective: 65536, cap: 65536 } });
   assert(getSupportedThinkingLevels(m).includes('max'));
   assert.deepEqual(m.compat, { supportsDeveloperRole: false, supportsStore: false, supportsReasoningEffort: true, maxTokensField: 'max_tokens', thinkingFormat: 'deepseek', requiresReasoningContentOnAssistantMessages: true });
   assert.equal((m.compat as any).supportsStrictMode, undefined, 'do not inherit the entire first-party policy');
@@ -57,7 +58,7 @@ test('dated DeepSeek snapshots resolve only while the vendor names that exact ve
   for (const version of ['deepseek-v4.1-flash-1017', 'deepseek/deepseek-v4.1-flash-1017']) {
     const [model] = buildModels(connection, root, { ...discovery, rows: [{ id: version }], protocols: { [version]: ['openai-completions'] } }, catalog);
     assert.equal(model.id, version, 'reference metadata never rewrites the requested ID');
-    assert.equal(model.contextWindow, 1048576); assert.equal(model.maxTokens, 393216);
+    assert.equal(model.contextWindow, 272000); assert.equal(model.maxTokens, 65536);
     assert.equal(model.reasoning, true); assert.deepEqual(model.input, ['text', 'image']);
     assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: 'max' });
     assert.equal(model.gateway.source.contextWindow, 'models.dev:deepseek');
@@ -104,10 +105,10 @@ test('native Pi sends system instructions, DeepSeek thinking and complete reason
     assert.deepEqual(p.thinking, { type: 'enabled' }); assert.equal(p.reasoning_effort, level);
     assert.equal(p.messages.find((message: any) => message.role === 'assistant').reasoning_content, '');
     assert.equal(p.messages.at(-1).role, 'tool'); assert(p.tools.some((tool: any) => tool.function.name === 'echo'));
-    assert.equal(p.store, undefined); assert.equal(p.max_completion_tokens, undefined); assert.equal(p.max_tokens, selected.maxTokens); assert(p.max_tokens <= 393216);
+    assert.equal(p.store, undefined); assert.equal(p.max_completion_tokens, undefined); assert.equal(p.max_tokens, selected.maxTokens); assert(p.max_tokens <= 65536);
   }
   const dated = runtime.getModel(connection.id, 'deepseek-v4.1-flash-1017')!;
-  assert.equal(dated.maxTokens, 393216, 'the vendor snapshot keeps its full output range');
+  assert.equal(dated.maxTokens, 65536, 'gateway policy caps output unless the user explicitly overrides it');
   const disabled = await payload(dated, 'off');
   assert.deepEqual(disabled.thinking, { type: 'disabled' });
   assert.equal(disabled.reasoning_effort, undefined);

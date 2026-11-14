@@ -1,6 +1,6 @@
 # pi-provider-gateway
 
-面向原生 Pi / Node.js 24 的通用兼容网关扩展。只管理 **连接、协议、模型目录与能力**；上游账号、路由、额度、负载均衡、用量面板均不在职责范围内。零第三方运行时依赖，使用 Pi 提供的原生接口。Pi 作为宿主提供 peer dependencies，不随插件捆绑或锁定版本；已验证环境见 [VALIDATION.md](VALIDATION.md)。
+面向原生 Pi / Node.js 24 的通用兼容网关扩展。只管理 **连接、协议、模型目录与能力**；上游账号、路由、额度、负载均衡、用量面板均不在职责范围内。**不做 fallback、跨模型重试或跨连接切换**：失败语义原样交给 Pi 或上游中转（例如 Magpie）；直连 API 时失败就是失败。零第三方运行时依赖，使用 Pi 提供的原生接口。Pi 作为宿主提供 peer dependencies，不随插件捆绑或锁定版本；已验证环境见 [VALIDATION.md](VALIDATION.md)。
 
 ## 使用
 
@@ -89,10 +89,12 @@ pi install /absolute/path/to/pi-provider-gateway
 
 ## 模型能力与兼容性
 
-- 网关明确的上下文、输出上限、输入模态、reasoning 和思考档位优先。
-- 缺失时使用 Pi 已安装目录的精确模型匹配，再使用 models.dev 公共目录。供应商索引与模型 ID 索引相互隔离；转售商的 `供应商/模型` ID 不会被当作原厂记录。原厂引用按显示名核对，忽略大小写与标点，不做相似度匹配：`deepseek-v4.1-flash` 对应 Pi 的 `deepseek-flash`；`deepseek-v4.1-flash-1017` 仅当原厂目录把 `deepseek-flash` 命名为同一版本时使用该记录的能力（1M 上下文、384K 输出、image、low/high/max），否则仍按未知模型处理。发请求时始终保留网关原 ID；多供应商有歧义则不武断匹配。
+- 网关明确的上下文、输出上限、输入模态、reasoning 和思考档位优先。默认安全策略再把上下文压到 **272,000**、输出压到 **65,536**，避免跨过 272K 阶梯价格边界和长上下文漂移；这是传输策略，不是对上游能力的虚假声明。`gateway.json` 的 `policy` 或单个服务的 `limits` 可覆盖，`null` 明确关闭该上限；Pi 原生 `models.json` 覆盖仍是最终用户层。
+- 端点声明 `reasoning_options` 时也参与 `off`／effort 解析；公共目录参考不会覆盖端点自己的声明。
+- 缺失时使用 Pi 已安装目录的精确模型匹配，再使用 models.dev 公共目录。供应商索引与模型 ID 索引相互隔离；转售商的 `供应商/模型` ID 不会被当作原厂记录。原厂引用按显示名核对，忽略大小写与标点，不做相似度匹配：`deepseek-v4.1-flash` 对应 Pi 的 `deepseek-flash`；`deepseek-v4.1-flash-1017` 仅当原厂目录把 `deepseek-flash` 命名为同一版本时使用该记录的参考能力（1M 上下文、384K 输出、image、low/high/max；默认再受 gateway policy 限制），否则仍按未知模型处理。发请求时始终保留网关原 ID；多供应商有歧义则不武断匹配。
 - 仍未知时，使用标为未验证的默认值（128K / 16K / text / 非 reasoning）；不能保证任意未知模型被完整识别。
-- `max` / `xhigh` 以真实档位映射保留，不把它们静默降为 high。网关明确列出的档位之外显式设为 null。公共目录声明可切换思考时 `off` 保持可选；思考档位未知时不宣称 `off` 不支持。
+- `max` / `xhigh` 以真实档位映射保留，不把它们静默降为 high。网关明确列出的档位之外显式设为 null。端点或公共目录声明可切换思考时 `off` 保持可选；思考档位未知时不宣称 `off` 不支持。不同接入点对 `off` 的声明可以不同，不为 UI 一致而伪造能力；需要时用模型覆盖或经用户确认的探测确认。
+- 上游把流式错误折叠成 `Unknown error`／空错误时，扩展只在 gateway provider 的 `message_end` 中把这种**不透明传输失败**规范成可重试的 `stream was interrupted`；上下文用量已达 90% 时改规范成 `context_length_exceeded`，让 Pi 压缩而不是盲目重试。401/402/403/404/413、配额、余额、账单、明确限流和明确上下文错误不改写。
 - 信息页按 USD／百万 tokens 列出输入、输出、缓存读取与写入价格。公共目录价格只是参考，不是网关账单；未知的零占位明确标为「不代表免费」，用户在原生覆盖中明确设置的价格单独标注来源。
 - **不整包继承官方模型 compat。** Responses 不自动启用未经验证的 `prompt_cache_options`；自定义 Chat Completions 默认使用 `system` 而非 `developer`，不发送可选 `store`。DeepSeek 使用 Pi 原生 thinking 格式及工具历史所需的 `reasoning_content`；这些传输策略不降低上下文、输出、图片、工具或 max 能力，原生用户 compat 覆盖仍优先。
 - 兼容 OpenAI 并不代表兼容所有可选字段；真实工具、图片与压缩仍需验收。
@@ -105,6 +107,25 @@ pi install /absolute/path/to/pi-provider-gateway
 「高级参数」使用原生 JSON 编辑器，支持 thinking 映射、采样、输入限制、阶梯价格和 compat 等完整可编辑字段。所有入口共用 `providers[服务ID].modelOverrides[模型ID]`、原生格式验证和并发检查，不维护第二份模型注册表。仅展示可编辑参数，不把已有 headers、凭据或 URL 放进编辑器；其他模型、provider 和非编辑字段保留。
 
 提交前由当前 Pi 原生格式验证；整个配置无效、取消、并发文件变化均拒绝覆盖。写入使用私有临时文件、文件锁和原子替换；协作锁不限制不遵守锁的外部编辑器，仍应避免同时修改。为保留注释，参数编辑器不重写 JSONC 文件，请在外部编辑后用「刷新配置」；原生刷新仍支持 JSONC。「协议偏好」是高级设置，保存在既有 Gateway `modelProtocols`，不把 schema 不支持的 `api` 写入 `modelOverrides`；原生 `models` upsert 的优先级仍高于 Gateway 选择。参数覆盖、协议偏好和付费诊断不是同一种操作。
+
+## 安全边界与配置
+
+`gateway.json` 可选策略：
+
+```json
+{
+  "version": 1,
+  "policy": { "contextWindowCap": 272000, "maxTokensCap": 65536 },
+  "connections": [
+    { "id": "relay", "name": "relay", "limits": { "contextWindowCap": null } }
+  ]
+}
+```
+
+- `policy` 是全局默认；单个服务的 `limits` 优先于它。
+- 省略字段继承默认值；`null` 表示该服务明确不设上限。
+- 上限只影响 Pi 看到的模型窗口和输出上限；不会改变上游请求 ID、协议或模型。
+- 查看模型页会列出 `原始 → 生效（cap）` 与 `[gateway policy]` 来源；用户可用原生覆盖恢复原始值。
 
 ## 持久化与边界
 
