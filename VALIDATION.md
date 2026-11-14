@@ -16,7 +16,8 @@ npm test
 ```
 
 - TypeScript 检查通过。
-- 98 项测试通过，0 失败、0 跳过；统计包含参数化子测试。
+- 99 项测试通过，0 失败、0 跳过；统计包含参数化子测试。
+- 真实 Pi 会话通过本地 loopback SSE 端点发出 6 次生成请求（首次 + 5 次重试），确认 gateway `message_end` 只规范化不透明断流后，Pi 的自动重试预算仍由宿主控制；测试不访问外部网络、不打印密钥。
 - 网关 ID 与原厂目录显示名逐字一致时才取用参考能力：`deepseek-v4.1-flash-1017` 的参考元数据为 1048576 上下文、393216 输出、image 与 low/high/max（off 仍可选）；默认 gateway policy 生效后为 272K／65,536，原厂未命名的 `deepseek-v4.1-flash-1102` 保持未验证默认值。真实 Pi 载荷检查所选模型的 `max_tokens`、`reasoning_effort` low/max，以及 off 只发送 `thinking: { type: "disabled" }`。公共目录声明 on/off 切换时 `off` 不落为 null；层级未知时按 Pi 默认档位集合处理。
 - 自定义服务 ID／URL 下的 DeepSeek 回归直接检查 Pi 原生序列化载荷：system 角色、thinking、low/max、工具结果后的 reasoning_content、无 store，以及原生 compat 覆盖优先。覆盖 canonical 与版本模型 ID，未传请求级 maxTokens 时检查默认 max_tokens 不超过原厂上限；供应商／模型索引不混用，转售商记录不会伪装原厂。原厂参考仍保留 1M 上下文、384K 输出、image 与 max；默认 gateway policy 再压到 272K／65,536，测试同时验证 `policy`、服务级 `limits` 与 `null` 关闭；载荷生成后即中止，不发送真实网络请求。缺少 probes 数组的缓存快照会被拒绝，诊断在发出请求前要求重新同步；持久化服务 ID 与 Pi 内置 provider 冲突时拒绝加载。
 - 慢连接验证期间外部轮换凭据会拒绝提交，保留新凭据及原 registry/cache 字节。原型同名的目录字段与模型 ID 不会成为继承的策略；SSE CRLF 即使逐字节分块也能识别协议成功事件。
